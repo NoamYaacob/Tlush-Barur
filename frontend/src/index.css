@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ */
+/* Global RTL + Hebrew baseline                                         */
+/* ------------------------------------------------------------------ */
+:root {
+  font-family: "Rubik", "Assistant", "Heebo", system-ui, -apple-system, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html {
+  direction: rtl;
+}
+
+body {
+  @apply bg-gray-50 text-gray-900 min-h-screen;
+  direction: rtl;
+  text-align: right;
+}
+
+/* Ensure all form elements respect RTL */
+input,
+textarea,
+select {
+  direction: rtl;
+  text-align: right;
+}
+
+/* Fix Tailwind's default LTR assumptions for common elements */
+.ltr {
+  direction: ltr;
+  text-align: left;
+}
