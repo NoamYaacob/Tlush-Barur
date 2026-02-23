@@ -1,0 +1,316 @@
+{
+  "upload_id": "e445740f-3dce-470c-8e9c-0e451fca2b24",
+  "original_filename": "test_slip.jpg",
+  "file_size_bytes": 9,
+  "mime_type": "image/jpeg",
+  "status": "done",
+  "progress_stage": "הניתוח הושלם",
+  "progress_pct": 100,
+  "error_message": null,
+  "answers": {
+    "salary_type": "monthly",
+    "job_scope_pct": "100",
+    "multiple_employers": null,
+    "has_benefit_in_kind": "yes",
+    "has_pension": "yes",
+    "has_training_fund": null,
+    "big_change_this_month": "no",
+    "big_change_description": null,
+    "has_shifts": null,
+    "has_travel": null,
+    "has_bonus": null,
+    "is_student": null,
+    "is_first_month": null,
+    "is_last_month": null
+  },
+  "result": {
+    "slip_meta": {
+      "pay_month": "2025-01",
+      "provider_guess": "חילן",
+      "confidence": 0.68,
+      "employer_name": "חברה לדוגמה בע\"מ",
+      "employee_name_redacted": true
+    },
+    "summary": {
+      "gross": 16550.0,
+      "gross_confidence": 0.93,
+      "net": 12293.0,
+      "net_confidence": 0.97,
+      "total_deductions": 3870.0,
+      "total_employer_contributions": 1930.0,
+      "income_tax": 2340.0,
+      "national_insurance": 620.0,
+      "health_insurance": 190.0,
+      "pension_employee": 720.0,
+      "integrity_ok": false,
+      "integrity_notes": [
+        "נטו מחושב (12680) שונה מנטו בתלוש (12,293) — בדוק ניכויים נסתרים"
+      ]
+    },
+    "line_items": [
+      {
+        "id": "li_base",
+        "category": "earning",
+        "description_hebrew": "שכר יסוד",
+        "explanation_hebrew": "שכר הבסיס החודשי שלך לפני כל תוספות.",
+        "value": 12000.0,
+        "raw_text": "שכר יסוד 12,000",
+        "confidence": 0.97,
+        "page_index": 0,
+        "is_unknown": false,
+        "unknown_guesses": [],
+        "unknown_question": null
+      },
+      {
+        "id": "li_overtime",
+        "category": "earning",
+        "description_hebrew": "שעות נוספות 125%",
+        "explanation_hebrew": "תגמול על שעות עבודה מעבר לנורמה בתעריף של 125% — הגדלה של 25% על כל שעה.",
+        "value": 850.0,
+        "raw_text": "שע\"נ 125% 850",
+        "confidence": 0.88,
+        "page_index": 0,
+        "is_unknown": false,
+        "unknown_guesses": [],
+        "unknown_question": null
+      },
+      {
+        "id": "li_travel",
+        "category": "earning",
+        "description_hebrew": "החזר נסיעות",
+        "explanation_hebrew": "החזר הוצאות נסיעה לעבודה. סכום מרבי יומי נקבע לפי מס הכנסה.",
+        "value": 550.0,
+        "raw_text": "נסיעות 550",
+        "confidence": 0.91,
+        "page_index": 0,
+        "is_unknown": false,
+        "unknown_guesses": [],
+        "unknown_question": null
+      },
+      {
+        "id": "li_meal",
+        "category": "earning",
+        "description_hebrew": "דמי הבראה",
+        "explanation_hebrew": "תוספת שנתית לפי יום הבראה, משולמת לרוב בחודשי יולי/אוגוסט. אם מופיעה עכשיו – כנראה פיצול חודשי.",
+        "value": 380.0,
+        "raw_text": "הבראה 380",
+        "confidence": 0.82,
+        "page_index": 0,
+        "is_unknown": false,
+        "unknown_guesses": [],
+        "unknown_question": null
+      },
+      {
+        "id": "li_car",
+        "category": "benefit_in_kind",
+        "description_hebrew": "שווי רכב",
+        "explanation_hebrew": "זקיפת שווי רכב — הסכום שמס הכנסה רואה כהכנסה עבור השימוש ברכב החברה. מגדיל את ברוטו לצורכי מס אך לא משפיע על תשלום בפועל.",
+        "value": 2470.0,
+        "raw_text": "שווי רכב 2,470",
+        "confidence": 0.79,
+        "page_index": 0,
+        "is_unknown": false,
+        "unknown_guesses": [],
+        "unknown_question": null
+      },
+      {
+        "id": "li_income_tax",
+        "category": "deduction",
+        "description_hebrew": "מס הכנסה",
+        "explanation_hebrew": "ניכוי מס הכנסה מחושב לפי מדרגות המס ונקודות הזיכוי שלך.",
+        "value": -2340.0,
+        "raw_text": "מס הכנסה (2,340)",
+        "confidence": 0.95,
+        "page_index": 0,
+        "is_unknown": false,
+        "unknown_guesses": [],
+        "unknown_question": null
+      },
+      {
+        "id": "li_bituach",
+        "category": "deduction",
+        "description_hebrew": "ביטוח לאומי (עובד)",
+        "explanation_hebrew": "ניכוי ביטוח לאומי מחלק העובד — מממן גמלאות נכות, אבטלה ועוד.",
+        "value": -620.0,
+        "raw_text": "ב\"ל עובד (620)",
+        "confidence": 0.96,
+        "page_index": 0,
+        "is_unknown": false,
+        "unknown_guesses": [],
+        "unknown_question": null
+      },
+      {
+        "id": "li_health",
+        "category": "deduction",
+        "description_hebrew": "ביטוח בריאות",
+        "explanation_hebrew": "ניכוי מס בריאות — ממן את קופות החולים.",
+        "value": -190.0,
+        "raw_text": "בריאות (190)",
+        "confidence": 0.96,
+        "page_index": 0,
+        "is_unknown": false,
+        "unknown_guesses": [],
+        "unknown_question": null
+      },
+      {
+        "id": "li_pension_emp",
+        "category": "deduction",
+        "description_hebrew": "פנסיה (עובד)",
+        "explanation_hebrew": "ניכוי חלק העובד לפנסיה. לפי חוק, המינימום הוא 6% משכר הבסיס.",
+        "value": -720.0,
+        "raw_text": "פנסיה עובד (720)",
+        "confidence": 0.93,
+        "page_index": 0,
+        "is_unknown": false,
+        "unknown_guesses": [],
+        "unknown_question": null
+      },
+      {
+        "id": "li_pension_er",
+        "category": "employer_contribution",
+        "description_hebrew": "פנסיה (מעסיק)",
+        "explanation_hebrew": "הפרשת המעסיק לפנסיה — לפחות 6.5% משכר הבסיס. כסף שמגיע לך מעבר לשכר הנטו.",
+        "value": 780.0,
+        "raw_text": "פנסיה מעסיק 780",
+        "confidence": 0.9,
+        "page_index": 0,
+        "is_unknown": false,
+        "unknown_guesses": [],
+        "unknown_question": null
+      },
+      {
+        "id": "li_bituach_er",
+        "category": "employer_contribution",
+        "description_hebrew": "ביטוח לאומי (מעסיק)",
+        "explanation_hebrew": "חלק המעסיק בביטוח לאומי — עלות ישירה למעסיק שאינה מופחתת מהנטו שלך.",
+        "value": 1150.0,
+        "raw_text": "ב\"ל מעסיק 1,150",
+        "confidence": 0.88,
+        "page_index": 0,
+        "is_unknown": false,
+        "unknown_guesses": [],
+        "unknown_question": null
+      },
+      {
+        "id": "li_unknown_1",
+        "category": "earning",
+        "description_hebrew": "לא מזוהה",
+        "explanation_hebrew": "שורה שלא הצלחנו לזהות בוודאות. ראה הצעות אפשריות למטה.",
+        "value": 300.0,
+        "raw_text": "תמריץ ביצוע 300",
+        "confidence": 0.41,
+        "page_index": 0,
+        "is_unknown": true,
+        "unknown_guesses": [
+          "בונוס ביצוע",
+          "תמריץ",
+          "פרמיה"
+        ],
+        "unknown_question": "מה לשאול את השכר?: האם קיבלת בונוס ביצוע החודש?"
+      }
+    ],
+    "anomalies": [
+      {
+        "id": "ano_net_mismatch",
+        "severity": "Critical",
+        "what_we_found": "פער בין ברוטו פחות ניכויים לנטו: ₪87",
+        "why_suspicious": "חישוב פשוט: ברוטו 16,250 פחות ניכויים 3,870 = 12,380. הנטו בתלוש הוא 12,293. הפרש של ₪87 לא מוסבר.",
+        "what_to_do": "בדוק אם יש ניכוי נסתר (הלוואה, עיקול, ביטוח מנהלים) שלא מופיע בפירוט. השווה לחודש הקודם.",
+        "ask_payroll": "האם יש ניכוי נוסף שאינו מפורט בתלוש החודש?",
+        "related_line_item_ids": [
+          "li_base",
+          "li_income_tax"
+        ]
+      },
+      {
+        "id": "ano_travel_high",
+        "severity": "Warning",
+        "what_we_found": "החזר נסיעות גבוה מהצפוי (₪550 על 22 ימי עבודה)",
+        "why_suspicious": "התעריף היומי המרבי לפי מס הכנסה הוא ₪22.60 ליום (2024). עבור 22 ימים: ₪497.20. הסכום המשולם גבוה ב-₪53.",
+        "what_to_do": "בדוק אם יש הסכם קיבוצי או חוזה אישי המתיר סכום גבוה יותר.",
+        "ask_payroll": "על פי מה מחושב החזר הנסיעות שלי?",
+        "related_line_item_ids": [
+          "li_travel"
+        ]
+      },
+      {
+        "id": "ano_pension_low",
+        "severity": "Warning",
+        "what_we_found": "ניכוי פנסיה (6%) נמוך ממינימום חוקי אפשרי בהתחשב בשכר הבסיס",
+        "why_suspicious": "שכר הבסיס הוא ₪12,000. 6% = ₪720. הניכוי בתלוש: ₪720 — תואם בדיוק. אולם המעסיק מפריש 6.5% ולא 7.5% כנדרש בהסכם קיבוצי בענף ההיי-טק.",
+        "what_to_do": "בדוק אם ההסכם הקיבוצי בענף שלך דורש הפרשה גבוהה יותר.",
+        "ask_payroll": "מה שיעור הפרשת המעסיק לפנסיה ומהו הבסיס לחישוב?",
+        "related_line_item_ids": [
+          "li_pension_emp",
+          "li_pension_er"
+        ]
+      },
+      {
+        "id": "ano_tax_credits",
+        "severity": "Info",
+        "what_we_found": "נקודות זיכוי: רק 2.75 זוהו. הצפוי לעובד/ת רגיל/ה: ≥ 2.75",
+        "why_suspicious": "בדוק אם מגיעות לך נקודות נוספות: ילדים, תואר אקדמי, תושב אזור עדיפות.",
+        "what_to_do": "עבור לטאב 'נקודות זיכוי' למילוי שאלון מהיר.",
+        "ask_payroll": "איזה טופס עלי להגיש כדי לקבל נקודות זיכוי נוספות?",
+        "related_line_item_ids": []
+      },
+      {
+        "id": "ano_unknown_item",
+        "severity": "Info",
+        "what_we_found": "שורה אחת בתלוש לא זוהתה אוטומטית (₪300)",
+        "why_suspicious": "הטקסט 'תמריץ ביצוע' אינו שם תקני — יתכן שזה בונוס, תמריץ מכירות, או פרמיה.",
+        "what_to_do": "ראה את הכרטיס 'לא מזוהה' בפירוט המלא ובחר את הקטגוריה הנכונה.",
+        "ask_payroll": "מהו 'תמריץ ביצוע' בתלוש שלי ואיך הוא ממוסה?",
+        "related_line_item_ids": [
+          "li_unknown_1"
+        ]
+      }
+    ],
+    "blocks": [
+      {
+        "section_name": "כותרת התלוש",
+        "bbox_json": {
+          "x": 0,
+          "y": 0,
+          "w": 800,
+          "h": 120
+        },
+        "page_index": 0,
+        "raw_text_preview": "שם עובד: [מושחת]  ת.ז: [מושחת]  חודש: 01/2025"
+      },
+      {
+        "section_name": "רכיבי שכר",
+        "bbox_json": {
+          "x": 0,
+          "y": 130,
+          "w": 800,
+          "h": 280
+        },
+        "page_index": 0,
+        "raw_text_preview": "שכר יסוד 12,000 | שע\"נ 850 | נסיעות 550 ..."
+      },
+      {
+        "section_name": "ניכויים",
+        "bbox_json": {
+          "x": 0,
+          "y": 420,
+          "w": 800,
+          "h": 200
+        },
+        "page_index": 0,
+        "raw_text_preview": "מס הכנסה (2,340) | ב\"ל (620) | בריאות (190) ..."
+      }
+    ],
+    "tax_credits_detected": {
+      "credit_points_detected": 2.75,
+      "estimated_monthly_value": 223.0,
+      "confidence": 0.72,
+      "notes": [
+        "זוהו 2.75 נקודות זיכוי בסיסיות",
+        "ייתכנו נקודות נוספות לפי פרטיים"
+      ]
+    },
+    "answers_applied": true
+  },
+  "transient": true
+}

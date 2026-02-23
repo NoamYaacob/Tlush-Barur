@@ -1,0 +1,23 @@
+# Python virtual environment
+.venv/
+venv/
+
+# Environment files - never commit secrets
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Distribution / build
+dist/
+build/
+*.egg-info/
+
+# Testing and type checking
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/

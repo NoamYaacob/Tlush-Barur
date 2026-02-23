@@ -1,0 +1,4 @@
+/* Tailwind CSS v3 directives - order matters */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
