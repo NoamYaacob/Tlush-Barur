@@ -82,6 +82,16 @@ class SummaryTotals(BaseModel):
     pension_employee: Optional[float] = None
     integrity_ok: bool = True
     integrity_notes: list[str] = Field(default_factory=list)
+    # Extended summary-box fields (OCR payslips, optional)
+    total_payments_other: Optional[float] = None       # סה"כ תשלומים אחרים
+    mandatory_taxes_total: Optional[float] = None      # ניכויי חובה-מסים
+    provident_funds_deduction: Optional[float] = None  # ניכוי קופות גמל
+    other_deductions: Optional[float] = None           # ניכויים שונים
+    net_salary: Optional[float] = None                 # שכר נטו
+    net_to_pay: Optional[float] = None                 # נטו לתשלום (summary box)
+    gross_taxable: Optional[float] = None              # ברוטו למס הכנסה
+    gross_ni: Optional[float] = None                   # ברוטו לביטוח לאומי
+    credit_points: Optional[float] = None              # נקודות זיכוי
 
 
 class LineItem(BaseModel):

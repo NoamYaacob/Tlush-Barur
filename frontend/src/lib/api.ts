@@ -61,6 +61,16 @@ export interface SummaryTotals {
   pension_employee: number | null;
   integrity_ok: boolean;
   integrity_notes: string[];
+  // Extended summary-box fields (OCR payslips, optional)
+  total_payments_other: number | null;        // סה"כ תשלומים אחרים
+  mandatory_taxes_total: number | null;       // ניכויי חובה-מסים
+  provident_funds_deduction: number | null;   // ניכוי קופות גמל
+  other_deductions: number | null;            // ניכויים שונים
+  net_salary: number | null;                  // שכר נטו
+  net_to_pay: number | null;                  // נטו לתשלום (summary box)
+  gross_taxable: number | null;               // ברוטו למס הכנסה
+  gross_ni: number | null;                    // ברוטו לביטוח לאומי
+  credit_points: number | null;               // נקודות זיכוי
 }
 
 export interface LineItem {

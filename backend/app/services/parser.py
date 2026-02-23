@@ -148,8 +148,75 @@ _FIELD_PATTERNS_OCR_EXTRA: dict[str, list[tuple[str, float]]] = {
         (r'מס\s+בריאו\S{0,3}\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
     ],
     "tax_credits": [
-        # "נקודות זיכוי" with spaces/typos
+        # "נקודות זיכוי" with spaces/typos — label before number
         (r'נקודו\S{0,3}\s+זיכו\S{0,2}\s*[:\-]?\s*([0-9]+\.?[0-9]*)', _CONF_OCR_EXACT),
+        # "נקודות" with number before (RTL layout: "2.25 ... נקודות")
+        (r'([0-9]+\.[0-9]{2})\s+[^\n]{0,30}נקודו\S{0,3}', _CONF_OCR_AMBIGUOUS),
+    ],
+    # -----------------------------------------------------------------------
+    # New summary-box fields (OCR only — not present in text-layer PDFs)
+    # -----------------------------------------------------------------------
+    "total_payments_other": [
+        # סה"כ תשלומים אחרים — tolerates smart/straight quote and spacing
+        (r'סה["\u05d4\u201c\u201d]?כ\s*תשלומ\S{0,3}\s*אחר\S{0,3}\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
+        (r'סהכ\s*תשלומ\S{0,3}\s*אחר\S{0,3}\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_AMBIGUOUS),
+        # Reversed order: "תשלומים 6,223.70" (OCR reads RTL — number in middle of line)
+        # Match lines containing "תשלומ" with a decimal amount on same line
+        (r'תשלומ\S{0,3}\s+([0-9][0-9,]+\.[0-9]{2})', _CONF_OCR_AMBIGUOUS),
+    ],
+    "mandatory_taxes_total": [
+        # ניכויי חובה-מסים / ניכויי חובה מסים (with various separators and OCR garble)
+        (r'ניכוי\S{0,2}\s+חובה\s*[-–\.\-]\s*מסי\S{0,2}\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
+        (r'ניכוי\S{0,2}\s+חובה\s+מסי\S{0,2}\s*[:\-]?\s*([0-9][0-9,\.]+)',            _CONF_OCR_EXACT),
+        # OCR garbles חובה → תחובה (extra ת) — "ניכויי תחובה.- מסים"
+        (r'ניכוי\S{0,2}\s+\S{0,2}חובה\S{0,2}\s*[-–\.\-]\s*מסי\S{0,2}\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_AMBIGUOUS),
+        (r'חובה\S{0,2}\s*[-–\.\-]\s*מסי\S{0,2}\s*[:\-]?\s*([0-9][0-9,\.]+)',          _CONF_OCR_AMBIGUOUS),
+    ],
+    "provident_funds_deduction": [
+        # ניכוי קופות גמל — normal order
+        (r'ניכוי\s+קופו\S{0,3}\s+גמל\S{0,2}\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
+        # OCR variant: "ניכויים לקופות" with number BEFORE label (RTL)
+        # e.g. "20 01 | 519.50( ניכויים לקופות. S/N."
+        (r'([0-9][0-9,]+\.[0-9]{2})\s*\(?[^\n]{0,15}ניכוי\S{0,3}\s+לקופו\S{0,3}', _CONF_OCR_AMBIGUOUS),
+    ],
+    "other_deductions": [
+        # ניכויים שונים
+        (r'ניכוי\S{0,3}\s+שונ\S{0,3}\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
+    ],
+    "net_salary": [
+        # שכר נטו (dedicated summary-box label, not a heuristic)
+        (r'שכר\s+נטו\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
+        # Reversed order (number before label, RTL layout artifact)
+        (r'([0-9][0-9,]+\.[0-9]{2})\s+[^\n]{0,30}שכר\s+נטו', _CONF_OCR_EXACT),
+        # RTL marker variant: "5,370.20 "yg ‏שכר" (OCR garbles leading chars before שכר)
+        (r'([0-9][0-9,]+\.[0-9]{2})[^\n]{0,15}[\u200e\u200f]?\s*שכר(?!\s+\S)', _CONF_OCR_AMBIGUOUS),
+    ],
+    "net_to_pay": [
+        # נטו לתשלום / נטלתשלום (summary box — distinct from line-level net_pay)
+        (r'נטו\s*ל\s*תשלום\s*[:\-]?\s*([0-9][0-9,\.]+)',   _CONF_OCR_EXACT),
+        (r'נט[וו]?\s*לת\s*שלום\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
+        (r'נטלתשלום\s*[:\-]?\s*([0-9][0-9,\.]+)',            _CONF_OCR_EXACT),
+    ],
+    "gross_taxable": [
+        # ברוטו למס הכנסה (summary-box version — also used for gross_pay above,
+        # but captured here at full confidence as a dedicated field)
+        # Normal order: label then number
+        (r'ברוטו\s+למס\s*הכנסה?\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
+        # "ברוטו למס רגיל" (OCR variant) — normal order
+        (r'ברוטו\s+למס\s*רגיל\S{0,3}\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
+        # "ברוטן למס הכנסה" (garbled ו→ן) — normal order
+        (r'ברוט\S\s+למס\s*הכנסה?\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
+        # Reversed order: number appears BEFORE label (RTL OCR layout artifact)
+        # "6,463.00 ... ברוטן למס הכנסה" — allow garbage chars between number and label
+        (r'([0-9][0-9,\.]+)[^\n]{0,40}ברוט[וּן]\s+למס\s*הכנסה?', _CONF_OCR_EXACT),
+        (r'([0-9][0-9,\.]+)[^\n]{0,40}ברוט\S\s+למס\s*רגיל', _CONF_OCR_EXACT),
+    ],
+    "gross_ni": [
+        # ברוטו לב.ל / ברוטו לביטוח לאומי — normal order
+        (r'ברוטו\s+ל(?:ב\.?ל|ביטו\S{0,4}\s+לאומ\S{0,3})\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
+        (r'ברוטו\s+לב\.?ל\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
+        # Reversed order (number before label)
+        (r'([0-9][0-9,\.]+)[:\s]*\S*\s*ברוטו\s+לב\.?לאומ\S{0,3}', _CONF_OCR_EXACT),
     ],
 }
 
@@ -218,6 +285,84 @@ def extract_field(
 
         for page_idx, text in pages_text.items():
             for m in compiled.finditer(text):
+                raw_match = m.group(0).strip()
+                value_str = m.group(1)
+                val = _parse_number(value_str)
+                if val is not None and val > 0:
+                    all_matches.append((val, raw_match, page_idx))
+
+        if not all_matches:
+            continue  # try next tier
+
+        # Consistency boost: same value found 2+ times
+        value_counts: dict[float, int] = {}
+        for val, _, _ in all_matches:
+            value_counts[val] = value_counts.get(val, 0) + 1
+
+        best_val, best_raw, best_page = all_matches[0]
+        confidence = base_confidence
+        if value_counts.get(best_val, 0) >= 2:
+            confidence = max(confidence, CONFIDENCE_BOOST)
+
+        return ExtractedField(
+            value=best_val,
+            raw_text=best_raw,
+            confidence=confidence,
+            source_page=best_page,
+        )
+
+    return None
+
+
+# Tokens that indicate a *table row* rather than a summary-box deduction line.
+# If a matched line also contains any of these, the match is considered a false positive.
+_TABLE_ROW_TOKENS: list[str] = [
+    "שעות",      # hours column
+    "הפסקה",     # break / deduction column in earnings table
+    "תעריף",     # rate column
+    "ימים",      # days column
+    "קוד",       # code column
+    "מחיר",      # price column
+    "יחידות",    # units column
+]
+
+# income_tax reject list: table-row tokens PLUS "ברוטו" (to avoid "ברוטו למס הכנסה" false positive)
+_INCOME_TAX_REJECT: list[str] = _TABLE_ROW_TOKENS + ["ברוטו"]
+
+
+def extract_field_filtered(
+    pages_text: dict[int, str],
+    field_name: str,
+    patterns: list[tuple[str, float]],
+    reject_tokens: list[str] | None = None,
+) -> "ExtractedField | None":
+    """
+    Like extract_field(), but additionally rejects any match whose source line
+    also contains one of the tokens in *reject_tokens* (table-row false-positive guard).
+
+    Only relevant when reject_tokens is not None/empty.
+    Falls back to plain extract_field() when no filtering is needed.
+    """
+    if not reject_tokens:
+        return extract_field(pages_text, field_name, patterns)
+
+    for pattern_str, base_confidence in patterns:
+        compiled = re.compile(pattern_str, re.UNICODE | re.IGNORECASE)
+        all_matches: list[tuple[float, str, int]] = []
+
+        for page_idx, text in pages_text.items():
+            for m in compiled.finditer(text):
+                # Determine the line that contains this match
+                match_start = m.start()
+                # Find the line boundaries
+                line_start = text.rfind('\n', 0, match_start) + 1
+                line_end_idx = text.find('\n', match_start)
+                line = text[line_start: line_end_idx if line_end_idx != -1 else len(text)]
+
+                # Skip if this line looks like a table row
+                if any(tok in line for tok in reject_tokens):
+                    continue
+
                 raw_match = m.group(0).strip()
                 value_str = m.group(1)
                 val = _parse_number(value_str)
@@ -753,13 +898,28 @@ def parse_with_ocr(
     # Use OCR-scaled confidence patterns
     net_field = extract_field(pages_text, "net_pay", FIELD_PATTERNS_OCR["net_pay"])
     gross_field = extract_field(pages_text, "gross_pay", FIELD_PATTERNS_OCR["gross_pay"])
-    income_tax_field = extract_field(pages_text, "income_tax", FIELD_PATTERNS_OCR["income_tax"])
+    # income_tax: filtered to reject table-row lines AND "ברוטו למס הכנסה" lines
+    # (which contain "מס הכנסה" but represent gross_taxable, not the deduction)
+    income_tax_field = extract_field_filtered(
+        pages_text, "income_tax", FIELD_PATTERNS_OCR["income_tax"],
+        reject_tokens=_INCOME_TAX_REJECT,
+    )
     national_ins_field = extract_field(pages_text, "national_insurance", FIELD_PATTERNS_OCR["national_insurance"])
     health_field = extract_field(pages_text, "health_tax", FIELD_PATTERNS_OCR["health_tax"])
     credits_field = extract_field(pages_text, "tax_credits", FIELD_PATTERNS_OCR["tax_credits"])
     # Use OCR-specific month extractor (Hebrew month-word + typo tolerance), falls back to numeric
     pay_month_result = extract_pay_month_ocr(pages_text)
     provider_name, provider_conf = detect_provider(full_text)
+
+    # New summary-box fields
+    total_payments_other_field   = extract_field(pages_text, "total_payments_other",   FIELD_PATTERNS_OCR.get("total_payments_other", []))
+    mandatory_taxes_total_field  = extract_field(pages_text, "mandatory_taxes_total",  FIELD_PATTERNS_OCR.get("mandatory_taxes_total", []))
+    provident_funds_field        = extract_field(pages_text, "provident_funds_deduction", FIELD_PATTERNS_OCR.get("provident_funds_deduction", []))
+    other_deductions_field       = extract_field(pages_text, "other_deductions",        FIELD_PATTERNS_OCR.get("other_deductions", []))
+    net_salary_field             = extract_field(pages_text, "net_salary",              FIELD_PATTERNS_OCR.get("net_salary", []))
+    net_to_pay_field             = extract_field(pages_text, "net_to_pay",              FIELD_PATTERNS_OCR.get("net_to_pay", []))
+    gross_taxable_field          = extract_field(pages_text, "gross_taxable",           FIELD_PATTERNS_OCR.get("gross_taxable", []))
+    gross_ni_field               = extract_field(pages_text, "gross_ni",                FIELD_PATTERNS_OCR.get("gross_ni", []))
 
     # Resolve scalar values
     net = net_field.value if net_field else None
@@ -874,6 +1034,15 @@ def parse_with_ocr(
             pension_employee=None,
             integrity_ok=integrity_ok,
             integrity_notes=integrity_notes,
+            total_payments_other=total_payments_other_field.value if total_payments_other_field else None,
+            mandatory_taxes_total=mandatory_taxes_total_field.value if mandatory_taxes_total_field else None,
+            provident_funds_deduction=provident_funds_field.value if provident_funds_field else None,
+            other_deductions=other_deductions_field.value if other_deductions_field else None,
+            net_salary=net_salary_field.value if net_salary_field else None,
+            net_to_pay=net_to_pay_field.value if net_to_pay_field else None,
+            gross_taxable=gross_taxable_field.value if gross_taxable_field else None,
+            gross_ni=gross_ni_field.value if gross_ni_field else None,
+            credit_points=credit_points,
         ),
         line_items=line_items,
         anomalies=anomalies,

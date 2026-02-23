@@ -163,6 +163,43 @@ function SummaryTab({ result }: { result: ParsedSlipPayload }) {
         </div>
       </div>
 
+      {/* Extended OCR summary box — only shown when at least one field is populated */}
+      {(summary.gross_taxable != null ||
+        summary.gross_ni != null ||
+        summary.total_payments_other != null ||
+        summary.mandatory_taxes_total != null ||
+        summary.provident_funds_deduction != null ||
+        summary.other_deductions != null ||
+        summary.net_salary != null ||
+        summary.net_to_pay != null ||
+        summary.credit_points != null) && (
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <h3 className="font-bold text-gray-700 mb-3">תיבות סיכום (OCR)</h3>
+          <div className="space-y-2 text-sm">
+            {[
+              { label: "ברוטו למס הכנסה",       value: summary.gross_taxable,             deduction: false },
+              { label: "ברוטו לביטוח לאומי",    value: summary.gross_ni,                  deduction: false },
+              { label: "סה״כ תשלומים אחרים",    value: summary.total_payments_other,      deduction: false },
+              { label: "ניכויי חובה — מסים",    value: summary.mandatory_taxes_total,     deduction: true  },
+              { label: "ניכוי קופות גמל",        value: summary.provident_funds_deduction, deduction: true  },
+              { label: "ניכויים שונים",           value: summary.other_deductions,          deduction: true  },
+              { label: "שכר נטו",                value: summary.net_salary,                deduction: false },
+              { label: "נטו לתשלום",             value: summary.net_to_pay,                deduction: false },
+              { label: "נקודות זיכוי",           value: summary.credit_points,             deduction: false },
+            ]
+              .filter((r) => r.value != null)
+              .map((r) => (
+                <div key={r.label} className="flex justify-between items-center border-b border-gray-100 pb-1">
+                  <span className="text-gray-600">{r.label}</span>
+                  <span className="font-medium text-gray-800" dir="ltr">
+                    {r.deduction ? `(${fmt(r.value)})` : fmt(r.value!)}
+                  </span>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
+
       {/* Integrity check */}
       <div className={`rounded-xl border p-4 ${summary.integrity_ok ? "bg-green-50 border-green-200" : "bg-red-50 border-red-200"}`}>
         <p className="font-semibold text-sm mb-1">
