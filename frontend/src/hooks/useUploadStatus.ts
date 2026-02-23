@@ -1,6 +1,8 @@
 /**
  * useUploadStatus – polls GET /api/uploads/:id every 1.5s until status is
  * "done" or "failed". Stops automatically on completion or unmount.
+ *
+ * Also detects HTTP 410 Gone (transient TTL expired) and sets `expired = true`.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -11,6 +13,7 @@ const POLL_INTERVAL_MS = 1500;
 export function useUploadStatus(uploadId: string | null) {
   const [data, setData] = useState<StatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [expired, setExpired] = useState(false);
   const [loading, setLoading] = useState(false);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -26,6 +29,7 @@ export function useUploadStatus(uploadId: string | null) {
 
     setLoading(true);
     setError(null);
+    setExpired(false);
 
     const poll = async () => {
       try {
@@ -36,9 +40,21 @@ export function useUploadStatus(uploadId: string | null) {
           stopPolling();
         }
       } catch (err: unknown) {
+        // Detect 410 Gone = transient TTL expired
+        if (err instanceof Response && err.status === 410) {
+          setExpired(true);
+          setLoading(false);
+          stopPolling();
+          return;
+        }
+        // Check if it's an Error with a message indicating expiry
         const msg =
           err instanceof Error ? err.message : "שגיאה בטעינת הנתונים";
-        setError(msg);
+        if (msg.includes("פג תוקף") || msg.includes("נמחק אוטומטית")) {
+          setExpired(true);
+        } else {
+          setError(msg);
+        }
         setLoading(false);
         stopPolling();
       }
@@ -53,5 +69,5 @@ export function useUploadStatus(uploadId: string | null) {
     return () => stopPolling();
   }, [uploadId]);
 
-  return { data, error, loading, stopPolling };
+  return { data, error, expired, loading, stopPolling };
 }

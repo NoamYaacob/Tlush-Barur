@@ -45,3 +45,7 @@ backend/.env
 *~
 .DS_Store
 Thumbs.db
+
+# Local data
+backend/.data/
+backend/.env

@@ -109,6 +109,13 @@ export interface ParsedSlipPayload {
   blocks: SectionBlock[];
   tax_credits_detected: TaxCreditsDetected | null;
   answers_applied: boolean;
+  // Phase 2B/2C: parse provenance
+  error_code: string | null;
+  // null = normal | "OCR_REQUIRED" (internal transient) | "OCR_UNAVAILABLE" = OCR deps missing
+  parse_source: string | null;
+  // "pdf_text_layer" | "ocr" | "mock" | "ocr_unavailable"
+  ocr_debug_preview: string | null;
+  // Local-dev debug only (populated when DEBUG_OCR_PREVIEW=true AND transient=true)
 }
 
 export interface UploadResponse {

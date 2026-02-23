@@ -37,6 +37,18 @@ cd frontend
 npm install
 ```
 
+## OCR Setup (optional)
+
+To analyze scanned PDFs and image files (JPG, PNG, HEIC), install:
+
+```bash
+brew install tesseract-lang   # Hebrew OCR support (heb.traineddata)
+brew install poppler           # PDF→image rasterizer (pdftoppm)
+```
+
+The backend auto-detects OCR availability on startup and logs the result.
+Without these deps, the analyzer works for digital (text-layer) PDFs only.
+
 ## Running the Application
 
 ### Start the backend (Terminal 1)

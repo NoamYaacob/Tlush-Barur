@@ -134,6 +134,16 @@ class ParsedSlipPayload(BaseModel):
     blocks: list[SectionBlock]
     tax_credits_detected: Optional[TaxCreditsDetected] = None
     answers_applied: bool = False   # True once quick-answers were used
+    # Phase 2B/2C: parse provenance
+    error_code: Optional[str] = None
+    # None = normal | "OCR_REQUIRED" = internal transient (immediately upgraded to OCR attempt) |
+    # "OCR_UNAVAILABLE" = OCR system deps missing | "IMAGE_UNSUPPORTED" = legacy (no longer emitted)
+    parse_source: Optional[str] = None
+    # "pdf_text_layer" | "ocr" | "mock" | "ocr_unavailable" | "ocr_required"
+    ocr_debug_preview: Optional[str] = None
+    # Local-dev debug only. Populated when DEBUG_OCR_PREVIEW=true AND transient=true.
+    # Contains: char count header + first ~30 OCR lines (digits redacted) + keyword hit list.
+    # Max 2000 chars. NEVER contains raw full OCR text.
 
 
 # ---------------------------------------------------------------------------

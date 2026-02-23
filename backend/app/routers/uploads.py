@@ -1,34 +1,41 @@
 """
-Upload routes:
-  POST /api/uploads                      – receive file → status: awaiting_questions
-  GET  /api/uploads/{upload_id}          – poll status + result
-  POST /api/uploads/{upload_id}/answers  – save answers → triggers processing job
+Upload routes (Phase 2A – DB-backed):
+  POST /api/uploads                      – store file + DB row → awaiting_questions
+  GET  /api/uploads/{upload_id}          – read from DB → status/progress/result
+  POST /api/uploads/{upload_id}/answers  – upsert answers in DB → trigger processing
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Annotated
 
 import aiofiles
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.crud import (
+    create_upload,
+    create_upload_file,
+    get_result,
+    get_upload,
+    update_upload_status,
+    upsert_quick_answers,
+)
+from app.db.database import get_db
 from app.models.schemas import (
     AnswersResponse,
+    ParsedSlipPayload,
     QuickAnswers,
     StatusResponse,
     UploadResponse,
-    UploadState,
     UploadStatus,
 )
 from app.services.processor import run_processing_job
-from app.services.storage import (
-    ensure_upload_dir,
-    file_path_for_upload,
-    load_state,
-    save_state,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +45,7 @@ router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 # Constants
 # ---------------------------------------------------------------------------
 
-MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB
+MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024   # 20 MB
 
 ALLOWED_MIME_TYPES = {
     "image/jpeg",
@@ -56,26 +63,43 @@ EXTENSION_MAP = {
     "application/pdf": "pdf",
 }
 
+# Physical storage root (.data/uploads/ inside backend/)
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
+_UPLOADS_DIR = _BACKEND_ROOT / ".data" / "uploads"
+
+
+def _upload_dir(upload_id: str) -> Path:
+    d = _UPLOADS_DIR / upload_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _file_dest(upload_id: str, extension: str) -> Path:
+    return _upload_dir(upload_id) / f"original.{extension}"
+
+
 # ---------------------------------------------------------------------------
 # POST /api/uploads
 # ---------------------------------------------------------------------------
 
 @router.post("", response_model=UploadResponse, status_code=201)
-async def create_upload(
+async def create_upload_endpoint(
     request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
     file: UploadFile = File(...),
     transient: bool = Form(True),
     redact: bool = Form(True),
     save_consent: bool = Form(False),
 ):
     """
-    Accept a payslip file (JPG/PNG/HEIC/PDF).
+    Accept a payslip file (JPG/PNG/HEIC/PDF, <= 20 MB).
     - Validates MIME type and size.
-    - Stores file transiently on disk.
-    - Returns upload_id with status 'awaiting_questions'.
-    - Does NOT start processing yet; waits for POST /answers.
+    - Writes file to .data/uploads/{id}/original.<ext>.
+    - Inserts Upload + UploadFile rows in DB.
+    - In transient mode: sets expires_at = now + 1h (controlled by TRANSIENT_TTL_HOURS env).
+    - Returns upload_id with status awaiting_questions.
     """
-    # -- validate MIME type --
+    # -- MIME validation --
     content_type = file.content_type or ""
     if content_type not in ALLOWED_MIME_TYPES:
         raise HTTPException(
@@ -86,7 +110,7 @@ async def create_upload(
             },
         )
 
-    # -- read and size-check (stream into memory then write) --
+    # -- Read + size check --
     file_bytes = await file.read()
     if len(file_bytes) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(
@@ -102,35 +126,39 @@ async def create_upload(
             detail={"error": "הקובץ ריק", "detail": "לא ניתן להעלות קובץ ריק."},
         )
 
-    # -- create upload record --
     upload_id = str(uuid.uuid4())
     extension = EXTENSION_MAP.get(content_type, "bin")
     safe_filename = Path(file.filename or "upload").name   # strip any path components
+    sha256 = hashlib.sha256(file_bytes).hexdigest()
 
-    # Log only metadata — never file bytes
+    # Log only metadata – never file bytes or content
     logger.info(
         "New upload: upload_id=%s filename=%s size=%d mime=%s transient=%s",
         upload_id, safe_filename, len(file_bytes), content_type, transient,
     )
 
-    # -- write file to disk --
-    ensure_upload_dir(upload_id)
-    dest = file_path_for_upload(upload_id, extension)
+    # -- Write file to disk --
+    dest = _file_dest(upload_id, extension)
     async with aiofiles.open(dest, "wb") as f:
         await f.write(file_bytes)
 
-    # -- persist initial state (awaiting_questions – no processing yet) --
-    state = UploadState(
+    # -- Insert DB rows (commit handled by get_db dependency) --
+    await create_upload(
+        db,
         upload_id=upload_id,
-        original_filename=safe_filename,
-        file_size_bytes=len(file_bytes),
+        filename=safe_filename,
         mime_type=content_type,
-        status=UploadStatus.AWAITING_QUESTIONS,
-        progress_stage="ממתין לתשובות",
-        progress_pct=0,
+        file_size_bytes=len(file_bytes),
         transient=transient,
+        redact=redact,
+        save_consent=save_consent,
     )
-    save_state(state)
+    await create_upload_file(
+        db,
+        upload_id=upload_id,
+        path=str(dest),
+        sha256=sha256,
+    )
 
     return UploadResponse(upload_id=upload_id, status=UploadStatus.AWAITING_QUESTIONS)
 
@@ -140,24 +168,54 @@ async def create_upload(
 # ---------------------------------------------------------------------------
 
 @router.get("/{upload_id}", response_model=StatusResponse)
-async def get_upload_status(upload_id: str):
+async def get_upload_status(
+    upload_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
     """
-    Poll upload processing status.
-    Returns progress and, when status == done, the full parsed payload.
+    Poll upload processing status from DB.
+    When status == done: returns the full parsed result.
+    When transient TTL has passed: returns 410 Gone with Hebrew expired message.
     """
-    state = load_state(upload_id)
-    if state is None:
+    row = await get_upload(db, upload_id)
+    if row is None:
         raise HTTPException(
             status_code=404,
             detail={"error": "העלאה לא נמצאה", "detail": f"upload_id {upload_id} לא קיים."},
         )
 
+    # -- Check for expired transient upload --
+    if row.transient and row.expires_at is not None:
+        now = datetime.now(timezone.utc)
+        exp = row.expires_at
+        # SQLite may return naive datetime; force UTC
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if exp <= now:
+            raise HTTPException(
+                status_code=410,
+                detail={
+                    "error": "פג תוקף",
+                    "detail": "התלוש הזה נמחק אוטומטית מטעמי פרטיות",
+                },
+            )
+
+    # -- Deserialize result if done --
+    result_payload: ParsedSlipPayload | None = None
+    if row.status == "done":
+        result_dict = await get_result(db, upload_id)
+        if result_dict:
+            try:
+                result_payload = ParsedSlipPayload.model_validate(result_dict)
+            except Exception as exc:
+                logger.error("Failed to parse result for %s: %s", upload_id, exc)
+
     return StatusResponse(
-        upload_id=state.upload_id,
-        status=state.status,
-        progress={"stage": state.progress_stage, "pct": state.progress_pct},
-        result=state.result,
-        error=state.error_message,
+        upload_id=row.id,
+        status=UploadStatus(row.status),
+        progress={"stage": row.progress_stage, "pct": row.progress_pct},
+        result=result_payload,
+        error=row.error_message,
     )
 
 
@@ -170,37 +228,39 @@ async def submit_answers(
     upload_id: str,
     answers: QuickAnswers,
     background_tasks: BackgroundTasks,
+    db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """
-    Store quick-answers and trigger background processing.
-    Only valid when status == awaiting_questions (or done, for re-analysis).
-    Transitions state: awaiting_questions → processing → done/failed.
+    Upsert quick-answers in DB and trigger background processing.
+    Transitions status: awaiting_questions → processing → done / failed.
     """
-    state = load_state(upload_id)
-    if state is None:
+    row = await get_upload(db, upload_id)
+    if row is None:
         raise HTTPException(
             status_code=404,
             detail={"error": "העלאה לא נמצאה", "detail": f"upload_id {upload_id} לא קיים."},
         )
 
-    if state.status == UploadStatus.PROCESSING:
+    if row.status == "processing":
         raise HTTPException(
             status_code=409,
             detail={"error": "כבר בעיבוד", "detail": "התלוש כבר בתהליך עיבוד. אנא המתן."},
         )
 
-    # Save answers; reset result so re-submission gives a fresh run
-    state.answers = answers
-    state.status = UploadStatus.PROCESSING
-    state.progress_stage = "מתחיל עיבוד…"
-    state.progress_pct = 0
-    state.result = None
-    state.error_message = None
-    save_state(state)
+    # -- Upsert answers + set status to processing --
+    answers_dict = answers.model_dump(exclude_none=True)
+    await upsert_quick_answers(db, upload_id=upload_id, answers_dict=answers_dict)
+    await update_upload_status(
+        db, upload_id,
+        status="processing",
+        progress_stage="מתחיל עיבוד…",
+        progress_pct=0,
+    )
+    # commit() is called by get_db() dependency after handler returns
 
-    logger.info("Answers received for upload_id=%s — processing started", upload_id)
+    logger.info("Answers saved for upload_id=%s — dispatching processing job", upload_id)
 
-    # Kick off background processing job (non-blocking)
+    # -- Kick off background job (non-blocking) --
     background_tasks.add_task(run_processing_job, upload_id)
 
     return AnswersResponse(

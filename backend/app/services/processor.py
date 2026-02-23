@@ -1,8 +1,8 @@
 """
-Processing service - Phase 1 stub.
-Simulates OCR extraction with a 2-5 second delay,
-then returns a rich mocked ParsedSlipPayload.
-Full OCR/extraction is implemented in Phase 2.
+Processing service.
+Phase 2A: progress + result are persisted to the DB.
+Phase 2B: PDFs with a text layer are parsed by the real parser (parser.py).
+          Images / scanned PDFs fall back to the mock payload or return an error_code.
 """
 
 from __future__ import annotations
@@ -22,10 +22,15 @@ from app.models.schemas import (
     SlipMeta,
     SummaryTotals,
     TaxCreditsDetected,
-    UploadState,
-    UploadStatus,
 )
-from app.services.storage import load_state, save_state
+from app.db.crud import (
+    get_quick_answers,
+    get_upload,
+    update_upload_status,
+    upsert_result,
+)
+from app.db.database import AsyncSessionLocal
+from app.services.parser import parse_pdf, parse_with_ocr
 
 logger = logging.getLogger(__name__)
 
@@ -311,7 +316,21 @@ def _build_mock_payload(answers: QuickAnswers | None) -> ParsedSlipPayload:
         blocks=blocks,
         tax_credits_detected=tax_credits,
         answers_applied=answers is not None,
+        parse_source="mock",
     )
+
+
+# ---------------------------------------------------------------------------
+# Internal DB helper
+# ---------------------------------------------------------------------------
+
+async def _update(upload_id: str, *, status: str, stage: str, pct: int, error: str | None = None) -> None:
+    """Persist status + progress to DB in its own short-lived session."""
+    async with AsyncSessionLocal() as db:
+        await update_upload_status(
+            db, upload_id, status=status, progress_stage=stage, progress_pct=pct, error_message=error
+        )
+        await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -320,60 +339,125 @@ def _build_mock_payload(answers: QuickAnswers | None) -> ParsedSlipPayload:
 
 async def run_processing_job(upload_id: str) -> None:
     """
-    Simulated processing pipeline:
-      1. Mark as processing
-      2. Sleep 2-4s (simulates OCR + extraction)
-      3. Build mocked payload
-      4. Mark as done
-    Errors are caught and persisted as failed status.
+    Real processing pipeline (Phase 2B).
+      1-3. Update progress stages with short UX delays.
+      4.   Fetch file path + MIME type + quick answers from DB.
+      5.   Route: PDF with text layer → real parser; otherwise → mock.
+      6.   Persist result_json to DB, mark done.
+    Errors are caught and persisted to DB as 'failed'.
     """
     logger.info("Processing job started for upload_id=%s", upload_id)
 
-    state = load_state(upload_id)
-    if state is None:
-        logger.error("Job started but state not found for upload_id=%s", upload_id)
-        return
-
     try:
-        # --- stage: processing ---
-        state.status = UploadStatus.PROCESSING
-        state.progress_stage = "מעבד את התלוש…"
-        state.progress_pct = 10
-        save_state(state)
+        # -- Stage 1: initial progress beat --
+        await _update(upload_id, status="processing", stage="מעבד את התלוש…", pct=10)
+        await asyncio.sleep(random.uniform(0.3, 0.5))
 
-        await asyncio.sleep(random.uniform(0.5, 1.0))
+        # -- Stage 2: announce text extraction --
+        await _update(upload_id, status="processing", stage="מחלץ טקסט…", pct=35)
+        await asyncio.sleep(random.uniform(0.3, 0.5))
 
-        state.progress_stage = "מחלץ טקסט…"
-        state.progress_pct = 35
-        save_state(state)
+        # -- Stage 3: announce field analysis --
+        await _update(upload_id, status="processing", stage="מנתח שורות ורכיבי שכר…", pct=65)
+        await asyncio.sleep(random.uniform(0.2, 0.4))
 
-        await asyncio.sleep(random.uniform(0.8, 1.5))
+        # -- Stage 4: real work starts here --
+        await _update(upload_id, status="processing", stage="בודק תקינות וחריגות…", pct=88)
 
-        state.progress_stage = "מנתח שורות ורכיבי שכר…"
-        state.progress_pct = 65
-        save_state(state)
+        # Fetch upload row (eager-loads upload_file) and quick answers in one session
+        file_path: str | None = None
+        mime_type: str | None = None
+        transient_flag: bool = False
+        answers_dict: dict | None = None
+        async with AsyncSessionLocal() as db:
+            upload_row = await get_upload(db, upload_id)
+            if upload_row:
+                mime_type = upload_row.mime_type
+                transient_flag = bool(upload_row.transient)
+                if upload_row.upload_file:
+                    file_path = upload_row.upload_file.path
+            answers_dict = await get_quick_answers(db, upload_id)
 
-        await asyncio.sleep(random.uniform(0.5, 1.0))
+        answers_obj: QuickAnswers | None = None
+        if answers_dict:
+            try:
+                answers_obj = QuickAnswers(**answers_dict)
+            except Exception:
+                answers_obj = None
 
-        state.progress_stage = "בודק תקינות וחריגות…"
-        state.progress_pct = 88
-        save_state(state)
+        # Route: PDF → real parser; scanned PDF → OCR upgrade; image → direct OCR
+        is_pdf = (mime_type == "application/pdf")
+        if is_pdf and file_path:
+            try:
+                # asyncio.to_thread runs the sync pdfplumber call in a thread pool
+                payload = await asyncio.to_thread(parse_pdf, file_path, answers_obj)
+            except Exception as exc:
+                logger.exception(
+                    "parse_pdf failed for upload_id=%s, falling back to mock: %s",
+                    upload_id, exc,
+                )
+                payload = _build_mock_payload(answers_obj)
+            # Upgrade OCR_REQUIRED → real Tesseract OCR attempt
+            if payload.error_code == "OCR_REQUIRED":
+                await _update(
+                    upload_id, status="processing",
+                    stage="מנסה לקרוא בעזרת OCR…", pct=75
+                )
+                try:
+                    payload = await asyncio.to_thread(
+                        parse_with_ocr, file_path, mime_type, answers_obj, transient_flag
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "parse_with_ocr (PDF) failed for upload_id=%s: %s",
+                        upload_id, exc,
+                    )
+                    # Keep existing payload (OCR_REQUIRED) as final result
+        elif file_path:
+            # Non-PDF image (JPG, PNG, HEIC) → direct OCR
+            await _update(
+                upload_id, status="processing",
+                stage="קורא תמונה עם OCR…", pct=50
+            )
+            try:
+                payload = await asyncio.to_thread(
+                    parse_with_ocr, file_path, mime_type or "image/jpeg", answers_obj, transient_flag
+                )
+            except Exception as exc:
+                logger.exception(
+                    "parse_with_ocr (image) failed for upload_id=%s: %s",
+                    upload_id, exc,
+                )
+                payload = _build_mock_payload(answers_obj)
+        else:
+            payload = _build_mock_payload(answers_obj)
 
-        await asyncio.sleep(random.uniform(0.3, 0.7))
+        payload_dict = payload.model_dump(mode="json")
 
-        # --- build mocked payload ---
-        payload = _build_mock_payload(state.answers)
-        state.result = payload
-        state.status = UploadStatus.DONE
-        state.progress_stage = "הניתוח הושלם"
-        state.progress_pct = 100
-        save_state(state)
+        # -- Persist result + mark done --
+        async with AsyncSessionLocal() as db:
+            await upsert_result(db, upload_id=upload_id, result_dict=payload_dict)
+            await update_upload_status(
+                db, upload_id, status="done", progress_stage="הניתוח הושלם", progress_pct=100
+            )
+            await db.commit()
 
-        logger.info("Processing done for upload_id=%s", upload_id)
+        logger.info(
+            "Processing done for upload_id=%s parse_source=%s error_code=%s",
+            upload_id,
+            payload.parse_source,
+            payload.error_code,
+        )
 
     except Exception as exc:
         logger.exception("Processing failed for upload_id=%s: %s", upload_id, exc)
-        state.status = UploadStatus.FAILED
-        state.error_message = "שגיאה פנימית בעיבוד התלוש. אנא נסה שוב."
-        state.progress_stage = "נכשל"
-        save_state(state)
+        try:
+            await _update(
+                upload_id,
+                status="failed",
+                stage="נכשל",
+                pct=0,
+                error="שגיאה פנימית בעיבוד התלוש. אנא נסה שוב.",
+            )
+        except Exception:
+            pass

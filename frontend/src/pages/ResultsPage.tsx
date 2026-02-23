@@ -90,6 +90,40 @@ function SummaryTab({ result }: { result: ParsedSlipPayload }) {
             <span className="text-gray-500">שם עובד: </span>
             <span className="text-gray-400 text-xs">מושחת לפרטיות</span>
           </div>
+          {/* Parse source badge */}
+          {result.parse_source === "pdf_text_layer" && (
+            <div className="col-span-2 mt-1">
+              <span className="inline-flex items-center gap-1 text-xs bg-green-100 text-green-800 px-2 py-0.5 rounded-full font-medium">
+                ✅ נקרא מטקסט ה-PDF
+              </span>
+            </div>
+          )}
+          {result.parse_source === "mock" && (
+            <div className="col-span-2 mt-1">
+              <span className="inline-flex items-center gap-1 text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full font-medium">
+                🔬 ניתוח לדוגמה (demo)
+              </span>
+            </div>
+          )}
+          {result.parse_source === "ocr" && (
+            <div className="col-span-2 mt-1">
+              <span className="inline-flex items-center gap-1 text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full font-medium">
+                ✅ נקרא באמצעות OCR
+              </span>
+            </div>
+          )}
+          {result.ocr_debug_preview && (
+            <div className="col-span-2 mt-2">
+              <details className="text-xs bg-yellow-50 border border-yellow-200 rounded-lg">
+                <summary className="px-3 py-1.5 cursor-pointer font-mono text-yellow-800 font-semibold select-none">
+                  🔍 OCR Debug Preview
+                </summary>
+                <pre className="px-3 pb-3 pt-1 text-gray-700 whitespace-pre-wrap break-all font-mono leading-relaxed overflow-auto max-h-60">
+                  {result.ocr_debug_preview}
+                </pre>
+              </details>
+            </div>
+          )}
         </div>
       </div>
 
@@ -395,7 +429,31 @@ export function ResultsPage() {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<TabId>("summary");
 
-  const { data, error, loading } = useUploadStatus(uploadId ?? null);
+  const { data, error, expired, loading } = useUploadStatus(uploadId ?? null);
+
+  // ---- Transient TTL expired (410 Gone) ----
+  if (expired) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
+        <div className="bg-white border border-gray-200 rounded-2xl p-8 text-center max-w-md shadow-sm">
+          <div className="text-5xl mb-4">🔒</div>
+          <p className="font-bold text-gray-800 text-lg mb-2">
+            התלוש הזה נמחק אוטומטית מטעמי פרטיות
+          </p>
+          <p className="text-sm text-gray-500 mb-6">
+            תלושים במצב אנונימי נמחקים אוטומטית לאחר שעה.
+            כדי לנתח את התלוש שוב, יש להעלות אותו מחדש.
+          </p>
+          <button
+            onClick={() => navigate("/upload")}
+            className="bg-blue-600 text-white px-6 py-3 rounded-xl text-sm font-semibold hover:bg-blue-700 transition-colors"
+          >
+            העלאת תלוש חדש
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // ---- Loading / awaiting_questions ----
   if (!data && loading) {
@@ -477,6 +535,35 @@ export function ResultsPage() {
             className="bg-blue-600 text-white px-6 py-2 rounded-lg text-sm font-medium hover:bg-blue-700"
           >
             העלה שוב
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- OCR unavailable (system deps missing — scanned PDF or image upload) ----
+  if (data.status === "done" && data.result?.error_code === "OCR_UNAVAILABLE") {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
+        <div className="bg-white border border-orange-200 rounded-2xl p-8 text-center max-w-md shadow-sm">
+          <div className="text-5xl mb-4">⚙️</div>
+          <p className="font-bold text-gray-800 text-lg mb-2">
+            נדרשת הגדרה נוספת לקריאת תמונות
+          </p>
+          <p className="text-sm text-gray-600 mb-4 leading-relaxed">
+            התלוש שהעלית הוא תמונה סרוקה או קובץ תמונה.
+            כדי לקרוא אותו נדרש Tesseract OCR עם תמיכה בעברית.
+          </p>
+          <div className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 text-sm text-right mb-6 font-mono text-gray-700">
+            <p className="font-sans font-semibold text-gray-600 mb-2">התקנה (macOS):</p>
+            <p>brew install tesseract-lang</p>
+            <p>brew install poppler</p>
+          </div>
+          <button
+            onClick={() => navigate("/upload")}
+            className="bg-blue-600 text-white px-6 py-3 rounded-xl text-sm font-semibold hover:bg-blue-700 transition-colors w-full"
+          >
+            העלאת תלוש חדש
           </button>
         </div>
       </div>
