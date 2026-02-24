@@ -7,7 +7,14 @@
 
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { type ParsedSlipPayload, type LineItem, type Anomaly } from "../lib/api";
+import {
+  type ParsedSlipPayload,
+  type LineItem,
+  type Anomaly,
+  type CreditWizardRequest,
+  type CreditWizardResult,
+  submitCreditWizard,
+} from "../lib/api";
 import { useUploadStatus } from "../hooks/useUploadStatus";
 import { ProgressBar } from "../components/ProgressBar";
 import { ConfidenceBadge } from "../components/ConfidenceBadge";
@@ -385,56 +392,331 @@ function AnomaliesTab({ result }: { result: ParsedSlipPayload }) {
   );
 }
 
-function TaxCreditsTab({ result }: { result: ParsedSlipPayload }) {
+// ---- OptionButtons helper (reused from QuestionsPage pattern) ----
+interface WizardOptionButtonsProps {
+  options: { value: string; label: string }[];
+  selected: string;
+  onChange: (v: string) => void;
+}
+function WizardOptionButtons({ options, selected, onChange }: WizardOptionButtonsProps) {
+  return (
+    <div className="flex flex-wrap gap-2 mt-1">
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          onClick={() => onChange(o.value)}
+          className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-all duration-150
+            ${selected === o.value
+              ? "bg-blue-600 text-white border-blue-600 shadow-sm"
+              : "bg-white text-gray-700 border-gray-300 hover:border-blue-400 hover:bg-blue-50"
+            }`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ---- Gap indicator pill ----
+function GapPill({ direction, gap }: { direction: string; gap: number | null }) {
+  if (direction === "ok")
+    return <span className="inline-flex items-center gap-1 text-green-700 bg-green-100 border border-green-300 rounded-full px-3 py-1 text-sm font-medium">✅ תואם</span>;
+  if (direction === "under" && gap !== null)
+    return <span className="inline-flex items-center gap-1 text-amber-700 bg-amber-100 border border-amber-300 rounded-full px-3 py-1 text-sm font-medium">⚠️ חסרות {gap.toFixed(2)} נקודות</span>;
+  if (direction === "over" && gap !== null)
+    return <span className="inline-flex items-center gap-1 text-red-700 bg-red-100 border border-red-300 rounded-full px-3 py-1 text-sm font-medium">🚨 עודף {Math.abs(gap).toFixed(2)} נקודות</span>;
+  return <span className="inline-flex items-center gap-1 text-gray-500 bg-gray-100 border border-gray-300 rounded-full px-3 py-1 text-sm font-medium">לא ידוע</span>;
+}
+
+// ---- Main TaxCreditsTab ----
+function TaxCreditsTab({ result, uploadId }: { result: ParsedSlipPayload; uploadId: string }) {
   const tc = result.tax_credits_detected;
+  const UNKNOWN = "unknown";
+
+  // Wizard form state
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [maritalStatus, setMaritalStatus] = useState(UNKNOWN);
+  const [numChildren, setNumChildren] = useState(0);
+  const [hasDegree, setHasDegree] = useState(UNKNOWN);
+  const [hasArmyService, setHasArmyService] = useState(UNKNOWN);
+  const [isNewImmigrant, setIsNewImmigrant] = useState(UNKNOWN);
+  const [isDisabled, setIsDisabled] = useState(UNKNOWN);
+
+  // Wizard result state
+  const [wizardLoading, setWizardLoading] = useState(false);
+  const [wizardResult, setWizardResult] = useState<CreditWizardResult | null>(null);
+  const [wizardError, setWizardError] = useState<string | null>(null);
+
+  async function handleWizardSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setWizardError(null);
+    setWizardLoading(true);
+    try {
+      const req: CreditWizardRequest = {
+        marital_status: maritalStatus,
+        num_children: numChildren,
+        has_degree: hasDegree,
+        has_army_service: hasArmyService,
+        is_new_immigrant: isNewImmigrant,
+        is_disabled: isDisabled,
+      };
+      const res = await submitCreditWizard(uploadId, req);
+      setWizardResult(res);
+    } catch (err: unknown) {
+      setWizardError(err instanceof Error ? err.message : "שגיאה בשליחת השאלון. נסה שוב.");
+    } finally {
+      setWizardLoading(false);
+    }
+  }
 
   return (
     <div className="space-y-4">
+      {/* Disclaimer */}
       <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-4 text-sm text-yellow-800">
         ⚠️ <strong>הצהרת גילוי נאות:</strong> הנתונים המוצגים כאן הם אומדן חינוכי בלבד.
         לייעוץ מס מוסמך פנה לרואה חשבון.
       </div>
 
+      {/* Detected credits (from slip) */}
       {tc ? (
-        <div className="space-y-3">
-          <div className="bg-white rounded-xl border border-gray-200 p-5">
-            <h3 className="font-bold text-gray-700 mb-3">נקודות זיכוי שזוהו בתלוש</h3>
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                <p className="text-xs text-gray-500">נקודות שזוהו</p>
-                <p className="text-2xl font-bold text-blue-700" dir="ltr">{tc.credit_points_detected ?? "—"}</p>
-                <ConfidenceBadge value={tc.confidence} />
-              </div>
-              <div className="bg-green-50 border border-green-200 rounded-lg p-3">
-                <p className="text-xs text-gray-500">שווי חודשי משוער</p>
-                <p className="text-2xl font-bold text-green-700" dir="ltr">{fmt(tc.estimated_monthly_value)}</p>
-              </div>
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <h3 className="font-bold text-gray-700 mb-3">נקודות זיכוי שזוהו בתלוש</h3>
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+              <p className="text-xs text-gray-500">נקודות שזוהו</p>
+              <p className="text-2xl font-bold text-blue-700" dir="ltr">{tc.credit_points_detected ?? "—"}</p>
+              <ConfidenceBadge value={tc.confidence} />
             </div>
-            <ul className="mt-4 space-y-1">
-              {tc.notes.map((n, i) => (
-                <li key={i} className="text-sm text-gray-600 flex gap-2">
-                  <span>•</span><span>{n}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          {/* Minimal wizard placeholder */}
-          <div className="bg-gray-50 border border-gray-200 rounded-xl p-5">
-            <p className="font-bold text-gray-700 mb-1">אולי מגיע לך יותר?</p>
-            <p className="text-sm text-gray-500 mb-4">
-              ענה על שאלות נוספות כדי לבדוק אם מגיעות לך נקודות זיכוי נוספות (ילדים, תואר, עולה חדש, שירות מילואים, ועוד).
-            </p>
-            <div className="opacity-50 text-sm text-center text-gray-400 bg-white border rounded-lg py-4">
-              שאלון מלא — יגיע בשלב הבא
+            <div className="bg-green-50 border border-green-200 rounded-lg p-3">
+              <p className="text-xs text-gray-500">שווי חודשי משוער</p>
+              <p className="text-2xl font-bold text-green-700" dir="ltr">{fmt(tc.estimated_monthly_value)}</p>
             </div>
           </div>
+          <ul className="mt-4 space-y-1">
+            {tc.notes.map((n, i) => (
+              <li key={i} className="text-sm text-gray-600 flex gap-2">
+                <span>•</span><span>{n}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       ) : (
-        <div className="text-center py-10 text-gray-400">
-          <p>לא זוהו נתוני נקודות זיכוי בתלוש זה.</p>
+        <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 text-sm text-gray-500">
+          לא זוהו נקודות זיכוי בתלוש זה — השתמש בשאלון למטה לאמדן.
         </div>
       )}
+
+      {/* ---- Tax Credits Wizard ---- */}
+      <div className="border border-gray-200 rounded-xl overflow-hidden">
+        {/* Collapsible header */}
+        <button
+          type="button"
+          onClick={() => setWizardOpen(!wizardOpen)}
+          className="w-full flex justify-between items-center px-5 py-4 bg-gray-50 hover:bg-gray-100 transition-colors text-sm font-semibold text-gray-700"
+        >
+          <span>🔍 בדוק אם מגיע לך יותר — שאלון נקודות זיכוי</span>
+          <span className="text-gray-400">{wizardOpen ? "▲" : "▼"}</span>
+        </button>
+
+        {wizardOpen && (
+          <form onSubmit={handleWizardSubmit} className="p-5 bg-white space-y-4">
+
+            {/* Q1 – Marital status */}
+            <div>
+              <p className="text-sm font-medium text-gray-700 mb-1">מה מצבך המשפחתי?</p>
+              <WizardOptionButtons
+                selected={maritalStatus}
+                onChange={setMaritalStatus}
+                options={[
+                  { value: "single", label: "רווק/ה" },
+                  { value: "married", label: "נשוי/אה" },
+                  { value: "divorced", label: "גרוש/ה" },
+                  { value: "widowed", label: "אלמן/ה" },
+                  { value: "unknown", label: "לא יודע/ת" },
+                ]}
+              />
+            </div>
+
+            {/* Q2 – Number of children */}
+            <div>
+              <p className="text-sm font-medium text-gray-700 mb-1">כמה ילדים מתחת לגיל 18?</p>
+              <div className="flex items-center gap-3 mt-1">
+                <button
+                  type="button"
+                  onClick={() => setNumChildren(Math.max(0, numChildren - 1))}
+                  className="w-8 h-8 rounded-lg border border-gray-300 bg-white text-gray-700 font-bold hover:bg-gray-50 flex items-center justify-center"
+                >−</button>
+                <span className="text-lg font-bold text-gray-800 w-6 text-center" dir="ltr">{numChildren}</span>
+                <button
+                  type="button"
+                  onClick={() => setNumChildren(numChildren + 1)}
+                  className="w-8 h-8 rounded-lg border border-gray-300 bg-white text-gray-700 font-bold hover:bg-gray-50 flex items-center justify-center"
+                >+</button>
+              </div>
+            </div>
+
+            {/* Q3 – Academic degree */}
+            <div>
+              <p className="text-sm font-medium text-gray-700 mb-1">יש לך תואר אקדמי (BA/BSc ומעלה)?</p>
+              <WizardOptionButtons
+                selected={hasDegree}
+                onChange={setHasDegree}
+                options={[
+                  { value: "yes", label: "כן" },
+                  { value: "no", label: "לא" },
+                  { value: "unknown", label: "לא יודע/ת" },
+                ]}
+              />
+            </div>
+
+            {/* Q4 – Army / national service */}
+            <div>
+              <p className="text-sm font-medium text-gray-700 mb-1">האם סיימת שירות צבאי / לאומי מלא?</p>
+              <WizardOptionButtons
+                selected={hasArmyService}
+                onChange={setHasArmyService}
+                options={[
+                  { value: "yes", label: "כן" },
+                  { value: "no", label: "לא" },
+                  { value: "unknown", label: "לא יודע/ת" },
+                ]}
+              />
+            </div>
+
+            {/* Q5 – New immigrant */}
+            <div>
+              <p className="text-sm font-medium text-gray-700 mb-1">האם אתה/את עולה חדש/ה (פחות מ-3.5 שנים בישראל)?</p>
+              <WizardOptionButtons
+                selected={isNewImmigrant}
+                onChange={setIsNewImmigrant}
+                options={[
+                  { value: "yes", label: "כן" },
+                  { value: "no", label: "לא" },
+                  { value: "unknown", label: "לא יודע/ת" },
+                ]}
+              />
+            </div>
+
+            {/* Q6 – Disability (informational) */}
+            <div>
+              <p className="text-sm font-medium text-gray-700 mb-1">האם יש לך נכות מוכרת (90% ומעלה)?</p>
+              <p className="text-xs text-gray-400 mb-1">מידע בלבד — הטבות נכות מורכבות ודורשות ייעוץ מקצועי</p>
+              <WizardOptionButtons
+                selected={isDisabled}
+                onChange={setIsDisabled}
+                options={[
+                  { value: "yes", label: "כן" },
+                  { value: "no", label: "לא" },
+                  { value: "unknown", label: "לא יודע/ת" },
+                ]}
+              />
+            </div>
+
+            {/* Error */}
+            {wizardError && (
+              <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg px-4 py-3 text-sm">
+                ⚠️ {wizardError}
+              </div>
+            )}
+
+            {/* Submit */}
+            <button
+              type="submit"
+              disabled={wizardLoading}
+              className={`w-full py-3 rounded-xl font-bold text-sm transition-all duration-200
+                ${!wizardLoading
+                  ? "bg-blue-600 hover:bg-blue-700 text-white shadow-sm hover:shadow-md active:scale-95"
+                  : "bg-blue-400 text-white cursor-not-allowed"
+                }`}
+            >
+              {wizardLoading ? (
+                <span className="flex items-center justify-center gap-2">
+                  <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                  </svg>
+                  מחשב…
+                </span>
+              ) : (
+                "בדוק נקודות זיכוי →"
+              )}
+            </button>
+
+            {/* ---- Wizard Result ---- */}
+            {wizardResult && (
+              <div className="mt-4 space-y-3 border-t border-gray-100 pt-4">
+
+                {/* Expected vs. detected summary */}
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
+                    <p className="text-xs text-gray-500">נקודות זיכוי צפויות</p>
+                    <p className="text-2xl font-bold text-purple-700" dir="ltr">{wizardResult.expected_points}</p>
+                    <ConfidenceBadge value={wizardResult.confidence} />
+                  </div>
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                    <p className="text-xs text-gray-500">נקודות שזוהו בתלוש</p>
+                    <p className="text-2xl font-bold text-blue-700" dir="ltr">{wizardResult.detected_points ?? "—"}</p>
+                  </div>
+                </div>
+
+                {/* Gap pill */}
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-gray-600 font-medium">תוצאה:</span>
+                  <GapPill direction={wizardResult.gap_direction} gap={wizardResult.gap} />
+                </div>
+
+                {/* Components breakdown */}
+                <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+                  <p className="text-xs font-semibold text-gray-500 mb-2 uppercase tracking-wide">פירוט נקודות צפויות</p>
+                  <div className="space-y-1 text-sm">
+                    {wizardResult.components.map((c, i) => (
+                      <div key={i} className="flex justify-between items-center">
+                        <span className={c.applied ? "text-gray-700" : "text-gray-400 line-through"}>
+                          {c.label_hebrew}
+                        </span>
+                        <span className={`font-medium tabular-nums ${c.applied ? "text-gray-800" : "text-gray-400"}`} dir="ltr">
+                          {c.applied ? `+${c.points}` : `(${c.points})`}
+                        </span>
+                      </div>
+                    ))}
+                    <div className="flex justify-between items-center border-t border-gray-200 pt-1 mt-1 font-bold text-gray-800">
+                      <span>סה״כ צפוי</span>
+                      <span dir="ltr">{wizardResult.expected_points}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Mismatch reasons */}
+                {wizardResult.mismatch_reasons.length > 0 && (
+                  <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                    <p className="text-xs font-semibold text-amber-700 mb-2">סיבות אפשריות לפער:</p>
+                    <ul className="space-y-1">
+                      {wizardResult.mismatch_reasons.map((r, i) => (
+                        <li key={i} className="text-sm text-amber-800 flex gap-2">
+                          <span>•</span><span>{r}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* What to do */}
+                {wizardResult.what_to_do && (
+                  <div className="bg-white border border-gray-200 rounded-lg p-4">
+                    <p className="text-xs font-semibold text-gray-500 mb-1">מה עושים?</p>
+                    <p className="text-sm text-gray-700">{wizardResult.what_to_do}</p>
+                  </div>
+                )}
+
+                {/* Disclaimer */}
+                <p className="text-xs text-gray-400 text-center">{wizardResult.disclaimer}</p>
+              </div>
+            )}
+          </form>
+        )}
+      </div>
     </div>
   );
 }
@@ -756,7 +1038,7 @@ export function ResultsPage() {
           {activeTab === "summary" && <SummaryTab result={result} />}
           {activeTab === "breakdown" && <BreakdownTab result={result} />}
           {activeTab === "anomalies" && <AnomaliesTab result={result} />}
-          {activeTab === "credits" && <TaxCreditsTab result={result} />}
+          {activeTab === "credits" && <TaxCreditsTab result={result} uploadId={uploadId ?? ""} />}
           {activeTab === "ytd" && <YtdTab result={result} />}
           {activeTab === "export" && <ExportTab />}
         </div>

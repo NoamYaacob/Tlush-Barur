@@ -155,6 +155,34 @@ export interface ParsedSlipPayload {
   balances: BalanceItem[];
 }
 
+// Phase 5: Tax Credits Wizard types
+export interface CreditWizardRequest {
+  marital_status: string;    // "single" | "married" | "divorced" | "widowed" | "unknown"
+  num_children: number;      // 0+
+  has_degree: string;        // "yes" | "no" | "unknown"
+  has_army_service: string;  // "yes" | "no" | "unknown"
+  is_new_immigrant: string;  // "yes" | "no" | "unknown"
+  is_disabled: string;       // "yes" | "no" | "unknown"
+}
+
+export interface CreditPointComponent {
+  label_hebrew: string;
+  points: number;
+  applied: boolean;
+}
+
+export interface CreditWizardResult {
+  expected_points: number;
+  detected_points: number | null;
+  gap: number | null;
+  gap_direction: string;  // "ok" | "under" | "over" | "unknown"
+  components: CreditPointComponent[];
+  mismatch_reasons: string[];
+  what_to_do: string;
+  confidence: number;
+  disclaimer: string;
+}
+
 export interface UploadResponse {
   upload_id: string;
   status: UploadStatus;
@@ -235,5 +263,21 @@ export async function submitAnswers(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(answers),
+  });
+}
+
+/**
+ * POST /api/uploads/:uploadId/credits-wizard
+ * Phase 5: Submit personal data for tax credit point estimation.
+ * Returns expected vs. detected comparison with mismatch reasons.
+ */
+export async function submitCreditWizard(
+  uploadId: string,
+  request: CreditWizardRequest
+): Promise<CreditWizardResult> {
+  return apiFetch<CreditWizardResult>(`/api/uploads/${uploadId}/credits-wizard`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
   });
 }

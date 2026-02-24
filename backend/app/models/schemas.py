@@ -185,6 +185,40 @@ class ParsedSlipPayload(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Phase 5: Tax Credits Wizard schemas
+# ---------------------------------------------------------------------------
+
+class CreditWizardRequest(BaseModel):
+    """User-declared personal data for tax credit point estimation."""
+    marital_status: str = "unknown"    # "single" | "married" | "divorced" | "widowed" | "unknown"
+    num_children: int = 0              # number of children under 18
+    has_degree: str = "unknown"        # "yes" | "no" | "unknown"  (BA/BSc or higher)
+    has_army_service: str = "unknown"  # "yes" | "no" | "unknown"  (IDF / national service completed)
+    is_new_immigrant: str = "unknown"  # "yes" | "no" | "unknown"  (עולה חדש, arrived < 3.5 yrs ago)
+    is_disabled: str = "unknown"       # "yes" | "no" | "unknown"  (≥ 90% disability — informational)
+
+
+class CreditPointComponent(BaseModel):
+    """A single credit point source with its point value and whether it was applied."""
+    label_hebrew: str
+    points: float
+    applied: bool   # True = user qualifies and points are included in expected total
+
+
+class CreditWizardResult(BaseModel):
+    """Result of the tax credits wizard: expected vs. detected comparison."""
+    expected_points: float
+    detected_points: Optional[float] = None   # from TaxCreditsDetected; None if slip had no data
+    gap: Optional[float] = None               # expected - detected (None if no detected)
+    gap_direction: str = "unknown"            # "ok" | "under" | "over" | "unknown"
+    components: list[CreditPointComponent] = Field(default_factory=list)
+    mismatch_reasons: list[str] = Field(default_factory=list)  # Hebrew explanations
+    what_to_do: str = ""                      # Hebrew actionable advice
+    confidence: float = 0.0                   # 0–1; lower when many fields are "unknown"
+    disclaimer: str = "אומדן חינוכי בלבד — לא ייעוץ מס"
+
+
+# ---------------------------------------------------------------------------
 # Upload state (persisted as JSON per upload_id)
 # ---------------------------------------------------------------------------
 

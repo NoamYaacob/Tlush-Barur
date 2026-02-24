@@ -29,6 +29,8 @@ from app.db.crud import (
 from app.db.database import get_db
 from app.models.schemas import (
     AnswersResponse,
+    CreditWizardRequest,
+    CreditWizardResult,
     ParsedSlipPayload,
     QuickAnswers,
     StatusResponse,
@@ -268,3 +270,46 @@ async def submit_answers(
         status=UploadStatus.PROCESSING,
         message="התשובות נשמרו, העיבוד החל",
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/uploads/{upload_id}/credits-wizard
+# ---------------------------------------------------------------------------
+
+@router.post("/{upload_id}/credits-wizard", response_model=CreditWizardResult)
+async def post_credits_wizard(
+    upload_id: str,
+    body: CreditWizardRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Phase 5 — Tax Credits Wizard.
+
+    Accepts personal data (marital status, children, degree, army service, immigration status),
+    computes expected credit points using 2025 Israeli tax authority rules, and compares
+    to the credit points detected in the payslip (if the parse is complete).
+
+    Stateless: results are not stored in the DB. The frontend may call this any number
+    of times if the user updates their answers.
+    """
+    row = await get_upload(db, upload_id)
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "העלאה לא נמצאה", "detail": f"upload_id {upload_id} לא קיים."},
+        )
+
+    # Extract detected credit points from the stored parse result (if available)
+    detected_points: float | None = None
+    if row.status == "done":
+        result_dict = await get_result(db, upload_id)
+        if result_dict:
+            try:
+                parsed = ParsedSlipPayload.model_validate(result_dict)
+                if parsed.tax_credits_detected:
+                    detected_points = parsed.tax_credits_detected.credit_points_detected
+            except Exception as exc:
+                logger.warning("Could not read tax_credits from result for %s: %s", upload_id, exc)
+
+    from app.services.credits_wizard import compute_credits
+    return compute_credits(body, detected_points)
