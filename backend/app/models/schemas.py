@@ -182,6 +182,8 @@ class ParsedSlipPayload(BaseModel):
     # Phase 3: YTD metrics and balance items
     ytd: Optional[YTDMetrics] = None
     balances: list[BalanceItem] = Field(default_factory=list)
+    # Phase 6: user corrections audit trail (append-only; old payloads without this key → [])
+    corrections: list[CorrectionEntry] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +218,29 @@ class CreditWizardResult(BaseModel):
     what_to_do: str = ""                      # Hebrew actionable advice
     confidence: float = 0.0                   # 0–1; lower when many fields are "unknown"
     disclaimer: str = "אומדן חינוכי בלבד — לא ייעוץ מס"
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: Corrections schemas
+# ---------------------------------------------------------------------------
+
+class CorrectionEntry(BaseModel):
+    """
+    Single user correction applied to a field in ParsedSlipPayload.
+    Embedded in the payload itself for an append-only audit trail.
+    field_path uses dot-notation: "summary.gross" | "line_items[li_id].value"
+    """
+    field_path: str                  # canonical path to the corrected field
+    original_value: Optional[float]  # value before correction (None if field was absent)
+    corrected_value: Optional[float] # new value (None = clear the field)
+    corrected_at: str                # ISO-8601 UTC string (str avoids datetime serialization issues)
+
+
+class CorrectionsRequest(BaseModel):
+    """Request body for PATCH /api/uploads/:id/corrections."""
+    corrections: list[dict[str, Any]]
+    # Each dict must have: {"field_path": str, "corrected_value": float | None}
+    # Example: [{"field_path": "summary.gross", "corrected_value": 12500.0}]
 
 
 # ---------------------------------------------------------------------------

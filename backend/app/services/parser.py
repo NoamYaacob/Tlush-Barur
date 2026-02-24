@@ -943,6 +943,103 @@ def _run_integrity_checks(
 
 
 # ---------------------------------------------------------------------------
+# Phase 6: Smart income-tax threshold helper
+# ---------------------------------------------------------------------------
+
+# 2024 Israeli tax authority values
+_CREDIT_POINT_TAX_VALUE: float = 242.0    # ₪ monthly tax reduction per credit point
+_INCOME_TAX_MARGINAL_RATE: float = 0.10   # bottom bracket rate used for threshold estimate
+_INCOME_TAX_NOISE_FLOOR: float = 100.0    # gaps ≤ ₪100 are not flagged
+
+
+def _check_income_tax_rule(
+    gross: "float | None",
+    income_tax: "float | None",
+    credit_points: "float | None",
+) -> "object | None":
+    """
+    Phase 6: Smart income-tax presence check.
+
+    Estimates expected tax: max(0, gross × 0.10 − credit_points × 242)
+
+    Returns:
+      - None  if income_tax is detected (no problem)
+      - Info  if estimated tax ≤ 0  (zero tax is EXPECTED — below threshold)
+      - None  if 0 < estimated ≤ ₪100  (borderline — not worth flagging)
+      - Warning if estimated > ₪100 and income_tax is None
+      - Warning if gross is None and income_tax is None  (can't estimate; flag generically)
+    """
+    from app.models.schemas import Anomaly, AnomalySeverity
+
+    # Income tax detected → no anomaly
+    if income_tax is not None:
+        return None
+
+    # No gross → can't estimate threshold; emit generic warning
+    if gross is None:
+        return Anomaly(
+            id="ano_missing_income_tax",
+            severity=AnomalySeverity.WARNING,
+            what_we_found="לא זוהה מס הכנסה בתלוש",
+            why_suspicious=(
+                "לא ניתן לאמת את סף המס כי ברוטו לא זוהה. "
+                "בתלוש שכר רגיל, מס הכנסה צריך להופיע."
+            ),
+            what_to_do="בדוק שורת מס הכנסה בתלוש הפיזי. אם היא קיימת, ייתכן שהמערכת לא זיהתה אותה.",
+            ask_payroll="מה גובה ניכוי מס ההכנסה שלי לחודש זה?",
+            related_line_item_ids=[],
+        )
+
+    effective_credits = credit_points or 0.0
+    estimated_tax = max(0.0, gross * _INCOME_TAX_MARGINAL_RATE - effective_credits * _CREDIT_POINT_TAX_VALUE)
+
+    if estimated_tax <= 0:
+        # Clearly below threshold — zero income tax is expected
+        return Anomaly(
+            id="ano_below_tax_threshold",
+            severity=AnomalySeverity.INFO,
+            what_we_found=(
+                f"שכר הברוטו ({gross:,.0f}₪) נמוך מסף מס ההכנסה — "
+                f"מס ההכנסה אפס הוא תקין"
+            ),
+            why_suspicious=(
+                f"לפי הנקודות הזיכוי שזוהו ({effective_credits:.2f} × ₪{_CREDIT_POINT_TAX_VALUE:.0f}) "
+                f"והשכר הברוטו, השכר אינו עובר את הסף החייב במס. "
+                "זה תקין לשכרות נמוכות / חלקיות."
+            ),
+            what_to_do="אין צורך בפעולה — מס הכנסה אפס הוא תקין עבור שכר זה.",
+            ask_payroll="האם אני אכן פטור ממס הכנסה לפי הנקודות ורמת השכר שלי?",
+            related_line_item_ids=[],
+        )
+
+    if estimated_tax > _INCOME_TAX_NOISE_FLOOR:
+        # Above threshold and tax is missing → Warning
+        return Anomaly(
+            id="ano_missing_income_tax",
+            severity=AnomalySeverity.WARNING,
+            what_we_found=(
+                f"לא זוהה מס הכנסה — צפוי כ-₪{estimated_tax:,.0f} "
+                f"(ברוטו {gross:,.0f}₪, {effective_credits:.2f} נקודות זיכוי)"
+            ),
+            why_suspicious=(
+                f"לפי אמדן ראשוני (ברוטו × 10% פחות זיכויים), "
+                f"מס ההכנסה הצפוי הוא כ-₪{estimated_tax:,.0f} לחודש. "
+                "אי-הופעת מס הכנסה בתלוש עשויה להצביע על שגיאה בחישוב או בזיהוי."
+            ),
+            what_to_do=(
+                "בדוק שורת מס הכנסה בתלוש הפיזי. "
+                "אם היא קיימת, ייתכן שהמערכת לא זיהתה אותה — תקן את הערך ידנית. "
+                "אם היא אינה קיימת, פנה למחלקת שכר."
+            ),
+            ask_payroll=f"מדוע לא מופיע מס הכנסה בתלוש? הצפוי כ-₪{estimated_tax:,.0f}.",
+            related_line_item_ids=[],
+        )
+
+    # Estimated in (0, ₪100] — borderline, not worth flagging
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Phase 4: Extended rule-engine checks (Warning / Info severity)
 # ---------------------------------------------------------------------------
 
@@ -959,39 +1056,47 @@ def _run_extended_checks(
     answers: object | None,
 ) -> list:
     """
-    Extended rule-engine checks for Phase 4.
+    Extended rule-engine checks (Phase 4, updated Phase 6).
     Returns list of Anomaly objects (Warning/Info severity).
     Critical anomalies are still handled by _build_anomalies_from_real_data().
 
     Rules:
-      A — Missing mandatory deductions → Warning
-      B — Credit points too low (<2.0) → Info; too high (>8.0) → Warning
-      C — net_to_pay vs. net_salary gap > ₪50 → Info
-      D — Pension (employee) rate out of range → Warning
-      E — No gross found → Info (cannot validate math)
+      A  — Income tax: smart threshold check (Phase 6 upgrade)
+      A2 — Missing national_ins AND health → Warning (regardless of income_tax)
+      B  — Credit points too low (<2.0) → Info; too high (>8.0) → Warning
+      C  — net_to_pay vs. net_salary gap > ₪50 → Info
+      D  — Pension (employee) rate out of range → Warning
+      E  — No gross found → Info (cannot validate math)
     """
     from app.models.schemas import Anomaly, AnomalySeverity, LineItemCategory
 
     anomalies: list = []
 
     # ------------------------------------------------------------------
-    # Rule A: Missing ALL mandatory deduction fields → Warning
+    # Rule A: Income tax — smart threshold check (Phase 6)
     # ------------------------------------------------------------------
-    if income_tax is None and national_ins is None and health is None:
+    income_tax_anomaly = _check_income_tax_rule(gross, income_tax, credit_points)
+    if income_tax_anomaly is not None:
+        anomalies.append(income_tax_anomaly)
+
+    # ------------------------------------------------------------------
+    # Rule A2: Missing BOTH national_ins AND health → Warning
+    # (These do not have a "below threshold" concept — always mandatory)
+    # ------------------------------------------------------------------
+    if national_ins is None and health is None:
         anomalies.append(Anomaly(
-            id="ano_missing_mandatory_deductions",
+            id="ano_missing_social_deductions",
             severity=AnomalySeverity.WARNING,
-            what_we_found="לא נמצאו ניכויי מס חובה בתלוש (מס הכנסה, ביטוח לאומי, מס בריאות)",
+            what_we_found="לא נמצאו ביטוח לאומי ומס בריאות בתלוש",
             why_suspicious=(
-                "בתלוש שכר רגיל חייבים להופיע ניכויי חובה: מס הכנסה, ביטוח לאומי ומס בריאות. "
-                "אם אלו נעדרים, ייתכן שמדובר בתלוש מיוחד (חיילים, מתנדבים, פטורים ממס) "
-                "או שהמערכת לא הצליחה לזהות את הניכויים."
+                "ביטוח לאומי ומס בריאות הם ניכויי חובה לכל עובד שכיר בישראל. "
+                "אי-זיהויים עשוי להצביע על פורמט תלוש לא מוכר."
             ),
             what_to_do=(
-                "בדוק בתלוש הפיזי אם יש שורות מס הכנסה, ביטוח לאומי ומס בריאות. "
-                "אם הן קיימות ולא הוצגו כאן, פנה אלינו."
+                "בדוק שורות ביטוח לאומי ומס בריאות בתלוש הפיזי. "
+                "אם הן קיימות, ניתן לתקן את הערכים ידנית."
             ),
-            ask_payroll="האם אני פטור ממס הכנסה ו/או ביטוח לאומי? מדוע לא מופיעים ניכויי מס בתלוש?",
+            ask_payroll="מדוע לא מופיעים ביטוח לאומי ומס בריאות בתלוש?",
             related_line_item_ids=[],
         ))
 

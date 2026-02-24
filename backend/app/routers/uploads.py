@@ -1,8 +1,10 @@
 """
 Upload routes (Phase 2A – DB-backed):
-  POST /api/uploads                      – store file + DB row → awaiting_questions
-  GET  /api/uploads/{upload_id}          – read from DB → status/progress/result
-  POST /api/uploads/{upload_id}/answers  – upsert answers in DB → trigger processing
+  POST  /api/uploads                           – store file + DB row → awaiting_questions
+  GET   /api/uploads/{upload_id}               – read from DB → status/progress/result
+  POST  /api/uploads/{upload_id}/answers       – upsert answers in DB → trigger processing
+  POST  /api/uploads/{upload_id}/credits-wizard – Phase 5: tax credits wizard (stateless)
+  PATCH /api/uploads/{upload_id}/corrections   – Phase 6: apply user corrections + recompute
 """
 
 from __future__ import annotations
@@ -25,10 +27,12 @@ from app.db.crud import (
     get_upload,
     update_upload_status,
     upsert_quick_answers,
+    upsert_result,
 )
 from app.db.database import get_db
 from app.models.schemas import (
     AnswersResponse,
+    CorrectionsRequest,
     CreditWizardRequest,
     CreditWizardResult,
     ParsedSlipPayload,
@@ -313,3 +317,90 @@ async def post_credits_wizard(
 
     from app.services.credits_wizard import compute_credits
     return compute_credits(body, detected_points)
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/uploads/{upload_id}/corrections  (Phase 6)
+# ---------------------------------------------------------------------------
+
+@router.patch("/{upload_id}/corrections", response_model=ParsedSlipPayload)
+async def apply_corrections_endpoint(
+    upload_id: str,
+    body: CorrectionsRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    Phase 6 — Apply user corrections to the parsed payslip payload.
+
+    Accepts a list of corrections (field_path + corrected_value), applies them to
+    the stored ParsedSlipPayload, reruns the integrity checks and anomaly rule engine
+    with the corrected values, and persists the updated payload back to the DB.
+
+    Returns the full updated ParsedSlipPayload (including corrections audit trail).
+
+    The corrections list in the payload is append-only — previous corrections are
+    preserved. Re-correcting the same field produces a new audit entry.
+
+    Raises:
+        404 if upload_id not found.
+        422 if the upload is not in 'done' state (no result to correct yet).
+        422 if any field_path is invalid or refers to a non-existent line item.
+    """
+    # -- Fetch upload row --
+    row = await get_upload(db, upload_id)
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "העלאה לא נמצאה", "detail": f"upload_id {upload_id} לא קיים."},
+        )
+
+    # -- Corrections only make sense on a completed parse --
+    if row.status != "done":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "תוצאה לא זמינה",
+                "detail": f"לא ניתן לתקן — סטטוס העלאה הוא '{row.status}', נדרש 'done'.",
+            },
+        )
+
+    # -- Load current result --
+    result_dict = await get_result(db, upload_id)
+    if not result_dict:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "תוצאה ריקה", "detail": "לא נמצאה תוצאת עיבוד לתיקון."},
+        )
+
+    try:
+        payload = ParsedSlipPayload.model_validate(result_dict)
+    except Exception as exc:
+        logger.error("Failed to deserialize result for corrections %s: %s", upload_id, exc)
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "שגיאת מערכת", "detail": "לא ניתן לטעון את התוצאה הקיימת."},
+        )
+
+    # -- Apply corrections (may raise ValueError on bad field paths) --
+    from app.services.corrections import apply_corrections_to_payload, recompute_anomalies
+
+    try:
+        updated = apply_corrections_to_payload(payload, body.corrections)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"error": "נתיב שדה לא תקין", "detail": str(exc)},
+        )
+
+    # -- Recompute integrity + anomalies with corrected values --
+    updated = recompute_anomalies(updated)
+
+    # -- Persist updated payload --
+    await upsert_result(db, upload_id=upload_id, result_dict=updated.model_dump(mode="json"))
+
+    logger.info(
+        "Corrections applied for upload_id=%s: %d correction(s), total audit trail=%d",
+        upload_id, len(body.corrections), len(updated.corrections),
+    )
+
+    return updated

@@ -3,17 +3,20 @@
  * Tabs: סיכום | פירוט מלא | חריגות ובדיקות | נקודות זיכוי | מצטברים | ייצוא
  * Polls GET /api/uploads/:id every 1.5s until done/failed.
  * Anomaly severity emojis: Critical=🚨 Warning=⚠️ Info=ℹ️
+ * Phase 6: Inline edit corrections for summary totals and line item values.
  */
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   type ParsedSlipPayload,
+  type CorrectionEntry,
   type LineItem,
   type Anomaly,
   type CreditWizardRequest,
   type CreditWizardResult,
   submitCreditWizard,
+  applyCorrections,
 } from "../lib/api";
 import { useUploadStatus } from "../hooks/useUploadStatus";
 import { ProgressBar } from "../components/ProgressBar";
@@ -66,11 +69,129 @@ const TABS = [
 type TabId = (typeof TABS)[number]["id"];
 
 // ---------------------------------------------------------------------------
+// Phase 6: EditableNumber inline component
+// ---------------------------------------------------------------------------
+
+interface EditableNumberProps {
+  value: number | null | undefined;
+  fieldPath: string;
+  /** Prefix shown before the number (default "₪") */
+  prefix?: string;
+  /** True when this specific field is being saved */
+  saving: boolean;
+  onSave: (fieldPath: string, newValue: number | null) => void;
+  /** Whether this field is corrected (has an entry in corrections) */
+  isCorrected?: boolean;
+  /** Raw display text — e.g. "(₪12,000)" for deductions */
+  displayText?: string;
+}
+
+function EditableNumber({
+  value,
+  fieldPath,
+  prefix = "₪",
+  saving,
+  onSave,
+  isCorrected = false,
+  displayText,
+}: EditableNumberProps) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  function startEdit() {
+    if (saving) return;
+    setDraft(value != null ? String(value) : "");
+    setEditing(true);
+    // Focus input on next tick after state update renders
+    setTimeout(() => inputRef.current?.select(), 0);
+  }
+
+  function commit() {
+    setEditing(false);
+    const trimmed = draft.trim();
+    if (trimmed === "" || trimmed === String(value)) {
+      return; // No change
+    }
+    const parsed = trimmed === "" ? null : parseFloat(trimmed);
+    if (parsed !== null && isNaN(parsed)) return; // invalid
+    onSave(fieldPath, parsed);
+  }
+
+  function cancel() {
+    setEditing(false);
+    setDraft("");
+  }
+
+  // While saving this field — show spinner
+  if (saving) {
+    return (
+      <span className="inline-flex items-center gap-1 text-blue-500">
+        <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24" fill="none">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+        </svg>
+        שומר…
+      </span>
+    );
+  }
+
+  if (editing) {
+    return (
+      <span className="inline-flex items-center gap-1">
+        <input
+          ref={inputRef}
+          type="number"
+          step="any"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { e.preventDefault(); commit(); }
+            if (e.key === "Escape") cancel();
+          }}
+          className="w-24 px-1.5 py-0.5 text-sm border border-blue-400 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 text-left font-mono"
+          dir="ltr"
+          autoFocus
+        />
+        <span className="text-gray-400 text-xs">Enter ✓ · Esc ✗</span>
+      </span>
+    );
+  }
+
+  const shown = displayText ?? (value != null ? `${prefix}${Math.abs(value).toLocaleString("he-IL", { maximumFractionDigits: 2 })}` : "—");
+
+  return (
+    <button
+      type="button"
+      title="לחץ לתיקון ידני"
+      onClick={startEdit}
+      className={`group inline-flex items-center gap-1 hover:opacity-80 transition-opacity
+        ${isCorrected ? "text-blue-600 italic font-semibold" : "text-gray-800 font-medium"}`}
+      dir="ltr"
+    >
+      <span>{shown}</span>
+      <span className="opacity-0 group-hover:opacity-60 text-xs transition-opacity select-none">✏️</span>
+    </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Tab sub-views
 // ---------------------------------------------------------------------------
 
-function SummaryTab({ result }: { result: ParsedSlipPayload }) {
+interface SummaryTabProps {
+  result: ParsedSlipPayload;
+  savingField: string | null;
+  onCorrection: (fieldPath: string, value: number | null) => void;
+  uploadId: string;
+}
+
+function SummaryTab({ result, savingField, onCorrection }: SummaryTabProps) {
   const { summary, slip_meta } = result;
+
+  // Build set of corrected field paths for italic-blue display
+  const correctedPaths = new Set((result.corrections ?? []).map((c) => c.field_path));
 
   return (
     <div className="space-y-4">
@@ -134,39 +255,98 @@ function SummaryTab({ result }: { result: ParsedSlipPayload }) {
         </div>
       </div>
 
-      {/* Summary cards */}
+      {/* Summary cards — gross and net are editable */}
       <div className="grid grid-cols-2 gap-3">
-        {[
-          { label: "ברוטו", value: summary.gross, conf: summary.gross_confidence, color: "bg-green-50 border-green-200" },
-          { label: "נטו לתשלום", value: summary.net, conf: summary.net_confidence, color: "bg-blue-50 border-blue-200" },
-          { label: "סה״כ ניכויים", value: summary.total_deductions, conf: 0.9, color: "bg-orange-50 border-orange-200" },
-          { label: "הפרשות מעסיק", value: summary.total_employer_contributions, conf: 0.9, color: "bg-purple-50 border-purple-200" },
-        ].map((c) => (
-          <div key={c.label} className={`rounded-xl border p-4 ${c.color}`}>
-            <p className="text-xs text-gray-500 mb-1">{c.label}</p>
-            <p className="text-2xl font-bold text-gray-800" dir="ltr">{fmt(c.value)}</p>
-            <ConfidenceBadge value={c.conf} />
+        {/* Gross — editable */}
+        <div className="rounded-xl border p-4 bg-green-50 border-green-200">
+          <p className="text-xs text-gray-500 mb-1">ברוטו</p>
+          <div className="text-2xl font-bold">
+            <EditableNumber
+              value={summary.gross}
+              fieldPath="summary.gross"
+              saving={savingField === "summary.gross"}
+              onSave={onCorrection}
+              isCorrected={correctedPaths.has("summary.gross")}
+            />
           </div>
-        ))}
+          <ConfidenceBadge value={summary.gross_confidence} />
+        </div>
+        {/* Net — editable */}
+        <div className="rounded-xl border p-4 bg-blue-50 border-blue-200">
+          <p className="text-xs text-gray-500 mb-1">נטו לתשלום</p>
+          <div className="text-2xl font-bold">
+            <EditableNumber
+              value={summary.net}
+              fieldPath="summary.net"
+              saving={savingField === "summary.net"}
+              onSave={onCorrection}
+              isCorrected={correctedPaths.has("summary.net")}
+            />
+          </div>
+          <ConfidenceBadge value={summary.net_confidence} />
+        </div>
+        {/* Total deductions — read-only computed */}
+        <div className="rounded-xl border p-4 bg-orange-50 border-orange-200">
+          <p className="text-xs text-gray-500 mb-1">סה״כ ניכויים</p>
+          <p className="text-2xl font-bold text-gray-800" dir="ltr">{fmt(summary.total_deductions)}</p>
+          <ConfidenceBadge value={0.9} />
+        </div>
+        {/* Employer contributions — read-only */}
+        <div className="rounded-xl border p-4 bg-purple-50 border-purple-200">
+          <p className="text-xs text-gray-500 mb-1">הפרשות מעסיק</p>
+          <p className="text-2xl font-bold text-gray-800" dir="ltr">{fmt(summary.total_employer_contributions)}</p>
+          <ConfidenceBadge value={0.9} />
+        </div>
       </div>
 
-      {/* Breakdown row */}
+      {/* Breakdown row — income_tax, national_insurance, health_insurance are editable */}
       <div className="bg-white rounded-xl border border-gray-200 p-5">
         <h3 className="font-bold text-gray-700 mb-3">פירוט ניכויים עיקריים</h3>
+        <p className="text-xs text-gray-400 mb-3">לחץ על ערך לתיקון ידני ✏️</p>
         <div className="space-y-2 text-sm">
-          {[
-            { label: "מס הכנסה", value: summary.income_tax },
-            { label: "ביטוח לאומי", value: summary.national_insurance },
-            { label: "ביטוח בריאות", value: summary.health_insurance },
-            { label: "פנסיה (עובד)", value: summary.pension_employee },
-          ].map((r) => (
-            <div key={r.label} className="flex justify-between items-center border-b border-gray-100 pb-1">
-              <span className="text-gray-600">{r.label}</span>
-              <span className="font-medium text-gray-800" dir="ltr">
-                {r.value != null ? `(${fmt(r.value)})` : "—"}
-              </span>
-            </div>
-          ))}
+          {/* Income tax — editable */}
+          <div className="flex justify-between items-center border-b border-gray-100 pb-1">
+            <span className="text-gray-600">מס הכנסה</span>
+            <EditableNumber
+              value={summary.income_tax}
+              fieldPath="summary.income_tax"
+              saving={savingField === "summary.income_tax"}
+              onSave={onCorrection}
+              isCorrected={correctedPaths.has("summary.income_tax")}
+              displayText={summary.income_tax != null ? `(${fmt(summary.income_tax)})` : undefined}
+            />
+          </div>
+          {/* National insurance — editable */}
+          <div className="flex justify-between items-center border-b border-gray-100 pb-1">
+            <span className="text-gray-600">ביטוח לאומי</span>
+            <EditableNumber
+              value={summary.national_insurance}
+              fieldPath="summary.national_insurance"
+              saving={savingField === "summary.national_insurance"}
+              onSave={onCorrection}
+              isCorrected={correctedPaths.has("summary.national_insurance")}
+              displayText={summary.national_insurance != null ? `(${fmt(summary.national_insurance)})` : undefined}
+            />
+          </div>
+          {/* Health insurance — editable */}
+          <div className="flex justify-between items-center border-b border-gray-100 pb-1">
+            <span className="text-gray-600">ביטוח בריאות</span>
+            <EditableNumber
+              value={summary.health_insurance}
+              fieldPath="summary.health_insurance"
+              saving={savingField === "summary.health_insurance"}
+              onSave={onCorrection}
+              isCorrected={correctedPaths.has("summary.health_insurance")}
+              displayText={summary.health_insurance != null ? `(${fmt(summary.health_insurance)})` : undefined}
+            />
+          </div>
+          {/* Pension employee — read-only (not in CORRECTABLE_SUMMARY_FIELDS) */}
+          <div className="flex justify-between items-center border-b border-gray-100 pb-1">
+            <span className="text-gray-600">פנסיה (עובד)</span>
+            <span className="font-medium text-gray-800" dir="ltr">
+              {summary.pension_employee != null ? `(${fmt(summary.pension_employee)})` : "—"}
+            </span>
+          </div>
         </div>
       </div>
 
@@ -219,11 +399,46 @@ function SummaryTab({ result }: { result: ParsedSlipPayload }) {
           <p className="text-xs text-gray-500">ברוטו פחות ניכויים ≈ נטו (בסבילות נורמלית)</p>
         )}
       </div>
+
+      {/* Phase 6: Corrections audit trail — only shown when at least one correction exists */}
+      {(result.corrections ?? []).length > 0 && (
+        <div className="bg-white rounded-xl border border-blue-200 p-5">
+          <h3 className="font-bold text-blue-700 mb-3 text-sm flex items-center gap-2">
+            <span>📝</span>
+            <span>תיקונים ידניים ({result.corrections!.length})</span>
+          </h3>
+          <div className="space-y-2 text-xs">
+            {result.corrections!.map((c: CorrectionEntry, i: number) => (
+              <div key={i} className="flex justify-between items-start border-b border-blue-50 pb-2 last:border-0 gap-3">
+                <span className="text-gray-500 font-mono break-all">{c.field_path}</span>
+                <div className="flex items-center gap-1.5 flex-shrink-0 text-right">
+                  <span className="text-gray-400 line-through">
+                    {c.original_value != null ? `₪${c.original_value.toLocaleString("he-IL")}` : "—"}
+                  </span>
+                  <span className="text-gray-400">→</span>
+                  <span className="text-blue-700 font-semibold">
+                    {c.corrected_value != null ? `₪${c.corrected_value.toLocaleString("he-IL")}` : "—"}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-xs text-gray-400 mt-3">
+            תיקונים אלה נשמרו ומשפיעים על חישוב החריגות
+          </p>
+        </div>
+      )}
     </div>
   );
 }
 
-function BreakdownTab({ result }: { result: ParsedSlipPayload }) {
+interface BreakdownTabProps {
+  result: ParsedSlipPayload;
+  savingField: string | null;
+  onCorrection: (fieldPath: string, value: number | null) => void;
+}
+
+function BreakdownTab({ result, savingField, onCorrection }: BreakdownTabProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const toggle = (id: string) => {
@@ -233,6 +448,9 @@ function BreakdownTab({ result }: { result: ParsedSlipPayload }) {
       return next;
     });
   };
+
+  // Build set of corrected line item field paths for italic-blue display
+  const correctedPaths = new Set((result.corrections ?? []).map((c) => c.field_path));
 
   // Group by category
   const categories = ["earning", "deduction", "employer_contribution", "benefit_in_kind", "balance"] as const;
@@ -246,6 +464,9 @@ function BreakdownTab({ result }: { result: ParsedSlipPayload }) {
         </div>
       )}
 
+      {/* Phase 6 hint */}
+      <p className="text-xs text-gray-400 px-1">לחץ על ערך כדי לתקן ✏️ — התיקון יישמר ויעדכן את הבדיקות</p>
+
       {categories.map((cat) => {
         const items = result.line_items.filter((li) => li.category === cat);
         if (items.length === 0) return null;
@@ -254,63 +475,82 @@ function BreakdownTab({ result }: { result: ParsedSlipPayload }) {
             <div className="bg-gray-50 px-5 py-3 font-bold text-sm text-gray-700 border-b border-gray-200">
               {CATEGORY_LABEL[cat]}
             </div>
-            {items.map((li: LineItem) => (
-              <div key={li.id} className="border-b border-gray-100 last:border-0">
-                <button
-                  type="button"
-                  onClick={() => toggle(li.id)}
-                  className="w-full flex justify-between items-start px-5 py-3 hover:bg-gray-50 transition-colors text-right"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className={`font-medium text-sm ${li.is_unknown ? "text-orange-600" : "text-gray-800"}`}>
-                      {li.description_hebrew}
-                    </span>
-                    {li.is_unknown && (
-                      <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full">
-                        לא מזוהה
-                      </span>
-                    )}
-                    <ConfidenceBadge value={li.confidence} />
-                  </div>
-                  <div className="flex items-center gap-2 flex-shrink-0 mr-2">
-                    <span className="font-bold text-gray-800 text-sm" dir="ltr">
-                      {li.value != null
-                        ? (li.category === "deduction" ? `(${fmt(li.value)})` : fmt(li.value))
-                        : "—"}
-                    </span>
-                    <span className="text-gray-400 text-xs">{expanded.has(li.id) ? "▲" : "▼"}</span>
-                  </div>
-                </button>
-
-                {expanded.has(li.id) && (
-                  <div className="px-5 pb-4 text-sm text-gray-600 bg-gray-50 space-y-2">
-                    <p className="leading-relaxed">{li.explanation_hebrew}</p>
-                    {li.raw_text && (
-                      <p className="text-xs text-gray-400 font-mono bg-white px-2 py-1 rounded border">
-                        טקסט מקורי: {li.raw_text}
-                      </p>
-                    )}
-                    {li.is_unknown && li.unknown_guesses.length > 0 && (
-                      <div>
-                        <p className="font-medium text-orange-700 mb-1">ניחושים אפשריים:</p>
-                        <div className="flex flex-wrap gap-1">
-                          {li.unknown_guesses.map((g) => (
-                            <span key={g} className="bg-orange-50 border border-orange-200 text-orange-700 text-xs px-2 py-0.5 rounded">
-                              {g}
-                            </span>
-                          ))}
-                        </div>
+            {items.map((li: LineItem) => {
+              const liFieldPath = `line_items[${li.id}].value`;
+              const liSaving = savingField === liFieldPath;
+              const liCorrected = correctedPaths.has(liFieldPath);
+              return (
+                <div key={li.id} className="border-b border-gray-100 last:border-0">
+                  {/* Row header — name on left, editable value on right */}
+                  <div className="w-full flex justify-between items-center px-5 py-3 hover:bg-gray-50 transition-colors">
+                    {/* Left: expand toggle + name */}
+                    <button
+                      type="button"
+                      onClick={() => toggle(li.id)}
+                      className="flex items-center gap-2 text-right flex-1 min-w-0"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className={`font-medium text-sm truncate ${li.is_unknown ? "text-orange-600" : "text-gray-800"}`}>
+                          {li.description_hebrew}
+                        </span>
+                        {li.is_unknown && (
+                          <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full flex-shrink-0">
+                            לא מזוהה
+                          </span>
+                        )}
+                        <ConfidenceBadge value={li.confidence} />
                       </div>
-                    )}
-                    {li.unknown_question && (
-                      <p className="text-xs text-blue-600 font-medium">
-                        💬 {li.unknown_question}
-                      </p>
-                    )}
+                      <span className="text-gray-400 text-xs flex-shrink-0">{expanded.has(li.id) ? "▲" : "▼"}</span>
+                    </button>
+
+                    {/* Right: editable value */}
+                    <div className="flex-shrink-0 mr-3" onClick={(e) => e.stopPropagation()}>
+                      <EditableNumber
+                        value={li.value}
+                        fieldPath={liFieldPath}
+                        saving={liSaving}
+                        onSave={onCorrection}
+                        isCorrected={liCorrected}
+                        displayText={
+                          liSaving ? undefined :
+                          li.value != null
+                            ? (li.category === "deduction" ? `(${fmt(li.value)})` : fmt(li.value))
+                            : undefined
+                        }
+                      />
+                    </div>
                   </div>
-                )}
-              </div>
-            ))}
+
+                  {expanded.has(li.id) && (
+                    <div className="px-5 pb-4 text-sm text-gray-600 bg-gray-50 space-y-2">
+                      <p className="leading-relaxed">{li.explanation_hebrew}</p>
+                      {li.raw_text && (
+                        <p className="text-xs text-gray-400 font-mono bg-white px-2 py-1 rounded border">
+                          טקסט מקורי: {li.raw_text}
+                        </p>
+                      )}
+                      {li.is_unknown && li.unknown_guesses.length > 0 && (
+                        <div>
+                          <p className="font-medium text-orange-700 mb-1">ניחושים אפשריים:</p>
+                          <div className="flex flex-wrap gap-1">
+                            {li.unknown_guesses.map((g) => (
+                              <span key={g} className="bg-orange-50 border border-orange-200 text-orange-700 text-xs px-2 py-0.5 rounded">
+                                {g}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {li.unknown_question && (
+                        <p className="text-xs text-blue-600 font-medium">
+                          💬 {li.unknown_question}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
         );
       })}
@@ -828,6 +1068,25 @@ export function ResultsPage() {
 
   const { data, error, expired, loading } = useUploadStatus(uploadId ?? null);
 
+  // Phase 6: Override result after correction (so UI refreshes immediately without re-poll)
+  const [resultOverride, setResultOverride] = useState<ParsedSlipPayload | null>(null);
+  const [savingField, setSavingField] = useState<string | null>(null);
+  const [correctionError, setCorrectionError] = useState<string | null>(null);
+
+  async function handleCorrection(fieldPath: string, newValue: number | null) {
+    if (!uploadId) return;
+    setSavingField(fieldPath);
+    setCorrectionError(null);
+    try {
+      const updated = await applyCorrections(uploadId, fieldPath, newValue);
+      setResultOverride(updated);
+    } catch (err: unknown) {
+      setCorrectionError(err instanceof Error ? err.message : "שגיאה בשמירת התיקון");
+    } finally {
+      setSavingField(null);
+    }
+  }
+
   // ---- Transient TTL expired (410 Gone) ----
   if (expired) {
     return (
@@ -968,7 +1227,8 @@ export function ResultsPage() {
   }
 
   // ---- Done ----
-  const result = data.result!;
+  // Use resultOverride (post-correction) if available, else fall back to poll result
+  const result = resultOverride ?? data.result!;
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -996,6 +1256,14 @@ export function ResultsPage() {
             >
               ערוך תשובות
             </button>
+          </div>
+        )}
+
+        {/* Phase 6: Correction error banner */}
+        {correctionError && (
+          <div className="flex justify-between items-center bg-red-50 border border-red-200 rounded-xl px-4 py-2 mb-4 text-sm text-red-700">
+            <span>⚠️ {correctionError}</span>
+            <button onClick={() => setCorrectionError(null)} className="text-red-500 hover:text-red-700 font-bold">✕</button>
           </div>
         )}
 
@@ -1035,8 +1303,21 @@ export function ResultsPage() {
 
         {/* Tab content */}
         <div>
-          {activeTab === "summary" && <SummaryTab result={result} />}
-          {activeTab === "breakdown" && <BreakdownTab result={result} />}
+          {activeTab === "summary" && (
+            <SummaryTab
+              result={result}
+              savingField={savingField}
+              onCorrection={handleCorrection}
+              uploadId={uploadId ?? ""}
+            />
+          )}
+          {activeTab === "breakdown" && (
+            <BreakdownTab
+              result={result}
+              savingField={savingField}
+              onCorrection={handleCorrection}
+            />
+          )}
           {activeTab === "anomalies" && <AnomaliesTab result={result} />}
           {activeTab === "credits" && <TaxCreditsTab result={result} uploadId={uploadId ?? ""} />}
           {activeTab === "ytd" && <YtdTab result={result} />}

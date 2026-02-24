@@ -153,6 +153,16 @@ export interface ParsedSlipPayload {
   // Phase 3: YTD metrics and carry-forward balances
   ytd: YTDMetrics | null;
   balances: BalanceItem[];
+  // Phase 6: user corrections audit trail (append-only; absent on old payloads → [])
+  corrections?: CorrectionEntry[];
+}
+
+// Phase 6: User correction audit trail entry
+export interface CorrectionEntry {
+  field_path: string;           // e.g. "summary.gross" | "line_items[li_id].value"
+  original_value: number | null; // value before correction (null if field was absent)
+  corrected_value: number | null; // new value (null = cleared)
+  corrected_at: string;          // ISO-8601 UTC string
 }
 
 // Phase 5: Tax Credits Wizard types
@@ -279,5 +289,29 @@ export async function submitCreditWizard(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request),
+  });
+}
+
+/**
+ * PATCH /api/uploads/:uploadId/corrections
+ * Phase 6: Apply a single user correction to the parsed payslip.
+ * Reruns integrity checks and anomaly rule engine with corrected values.
+ * Returns the full updated ParsedSlipPayload including corrections audit trail.
+ *
+ * @param uploadId   The upload to correct.
+ * @param fieldPath  Dot-notation path, e.g. "summary.gross" | "line_items[li_id].value"
+ * @param correctedValue  New numeric value, or null to clear the field.
+ */
+export async function applyCorrections(
+  uploadId: string,
+  fieldPath: string,
+  correctedValue: number | null,
+): Promise<ParsedSlipPayload> {
+  return apiFetch<ParsedSlipPayload>(`/api/uploads/${uploadId}/corrections`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      corrections: [{ field_path: fieldPath, corrected_value: correctedValue }],
+    }),
   });
 }
