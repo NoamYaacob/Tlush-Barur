@@ -106,6 +106,9 @@ class LineItem(BaseModel):
     is_unknown: bool = False
     unknown_guesses: list[str] = Field(default_factory=list)
     unknown_question: Optional[str] = None
+    # Phase 8: Per-unit quantity and rate for multi-column payslip rows
+    quantity: Optional[float] = None   # כמות — e.g. number of days, hours
+    rate: Optional[float] = None       # תעריף — e.g. ₪ per day, ₪ per hour
 
 
 class Anomaly(BaseModel):

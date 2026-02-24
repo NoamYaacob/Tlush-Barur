@@ -253,13 +253,19 @@ def test_no_gross_emits_info():
 # ---------------------------------------------------------------------------
 
 def test_all_clean_no_extended_anomalies():
-    """When all data is present and within normal ranges → no extended anomalies."""
+    """When all data is present and within normal ranges → no extended anomalies.
+
+    Phase 8: NI and health values must match the 2025/2026 bracket formula closely.
+    For gross=15_000 (above ₪7_522 threshold):
+      expected NI     = 7_522×0.0104 + (15_000−7_522)×0.07  ≈  602
+      expected health = 7_522×0.0323 + (15_000−7_522)×0.0517 ≈  630
+    """
     anomalies = _call_extended(
         gross=15_000.0,
         net=11_500.0,
         income_tax=2_000.0,
-        national_ins=700.0,
-        health=500.0,
+        national_ins=602.0,    # matches 2025/2026 bracket calculation (≈601.69)
+        health=630.0,          # matches 2025/2026 bracket calculation (≈629.57)
         credit_points=2.25,    # normal
         net_salary=11_500.0,
         net_to_pay=11_500.0,   # no gap

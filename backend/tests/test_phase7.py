@@ -311,9 +311,9 @@ def test_rule_g_ni_rate_out_of_range_warns():
         credit_points=2.25,
     )
     ids = {a.id for a in anomalies}
-    assert "ano_national_insurance_rate_unusual" in ids, \
+    assert "ano_national_insurance_bracket_mismatch" in ids, \
         f"Expected Rule G anomaly; got {ids}"
-    ano = next(a for a in anomalies if a.id == "ano_national_insurance_rate_unusual")
+    ano = next(a for a in anomalies if a.id == "ano_national_insurance_bracket_mismatch")
     assert ano.severity.value == "Warning"
     assert "ביטוח לאומי" in ano.what_we_found
     assert ano.ask_payroll, "ask_payroll must not be empty"
@@ -337,9 +337,9 @@ def test_rule_h_health_rate_out_of_range_warns():
         credit_points=2.25,
     )
     ids = {a.id for a in anomalies}
-    assert "ano_health_tax_rate_unusual" in ids, \
+    assert "ano_health_tax_bracket_mismatch" in ids, \
         f"Expected Rule H anomaly; got {ids}"
-    ano = next(a for a in anomalies if a.id == "ano_health_tax_rate_unusual")
+    ano = next(a for a in anomalies if a.id == "ano_health_tax_bracket_mismatch")
     assert ano.severity.value == "Warning"
     assert "בריאות" in ano.what_we_found
     assert ano.ask_payroll, "ask_payroll must not be empty"

@@ -964,8 +964,36 @@ _NI_RATE_MIN: float = 0.02    # 2%
 _NI_RATE_MAX: float = 0.15    # 15%
 
 # Health Tax (מס בריאות) — flat 3.1% below threshold, ~5% above
+# (superseded by Phase 8 exact brackets; kept for reference)
 _HEALTH_RATE_MIN: float = 0.015   # 1.5% (low-income edge)
 _HEALTH_RATE_MAX: float = 0.065   # 6.5% (upper, with variation)
+
+# ---------------------------------------------------------------------------
+# Phase 8: Precise 2025/2026 Israeli law constants
+# ---------------------------------------------------------------------------
+
+# Income tax — 2025 multi-bracket (replaces single-rate estimate from Phase 7.1)
+_INCOME_TAX_BRACKET_1_MAX: float = 7_010.0    # ₪/month — top of 10% bracket
+_INCOME_TAX_BRACKET_2_MAX: float = 10_060.0   # ₪/month — top of 14% bracket
+_INCOME_TAX_BRACKET_2_RATE: float = 0.14      # rate for bracket 2
+
+# NI / Health — 2025/2026 exact bracket thresholds (replaces coarse bounds above)
+_NI_BRACKET_THRESHOLD: float = 7_522.0        # monthly ₪ threshold
+_NI_RATE_LOW: float = 0.0104                  # 1.04% below threshold
+_NI_RATE_HIGH: float = 0.07                   # 7.00% above threshold
+_HEALTH_RATE_LOW: float = 0.0323              # 3.23% below threshold
+_HEALTH_RATE_HIGH: float = 0.0517             # 5.17% above threshold
+
+# Convalescence pay (דמי הבראה) — private sector legal minimum rate
+_CONVALESCENCE_DAILY_RATE_MIN: float = 418.0  # ₪/day (frozen, private sector)
+
+# Severance / Section 14 (פיצויים / סעיף 14)
+_SEVERANCE_RATE_8_33: float = 0.0833          # Section 14 full rate (≈8.33%)
+_SEVERANCE_RATE_6: float = 0.06               # Standard severance rate (6%)
+_SEVERANCE_RATE_TOLERANCE: float = 0.005      # ±0.5% matching tolerance
+
+# Employee pension minimum (חוק פנסיה חובה)
+_PENSION_EMPLOYEE_RATE_MIN_P8: float = 0.06   # 6% — mandatory minimum
 
 
 def _check_income_tax_rule(
@@ -976,18 +1004,19 @@ def _check_income_tax_rule(
     provident_funds_deduction: "float | None" = None,
 ) -> "object | None":
     """
-    Phase 7.1: Smart income-tax presence check with Section 45a pension tax credit.
+    Phase 8: Smart income-tax presence check — 2025 multi-bracket + Section 45a credit.
 
-    Formula (Israeli 2024):
-      estimated_tax = (gross_taxable * 0.10)
-                    − (credit_points * 258)
-                    − (provident_funds_deduction * 0.35)   ← Section 45a pension credit
+    Formula (Israeli 2025):
+      Bracket 1: gross_base × 10%        (up to ₪7,010/month)
+      Bracket 2: (gross_base − ₪7,010) × 14%  (₪7,011–₪10,060/month)
+      Less: credit_points × 258          (credit point monthly value)
+      Less: provident_funds × 35%        (Section 45a pension tax credit)
 
     Uses gross_taxable if available; falls back to gross otherwise.
 
     Returns:
       - None    if income_tax is detected (no problem)
-      - Info    if estimated_tax ≤ 0  (zero tax is EXPECTED — below threshold after pension credit)
+      - Info    if estimated_tax ≤ 0  (zero tax is EXPECTED — below threshold)
       - None    if 0 < estimated_tax ≤ ₪20  (borderline — not worth flagging)
       - Warning if estimated_tax > ₪20 and income_tax is None
       - Warning if gross is None and income_tax is None  (can't estimate; flag generically)
@@ -1016,8 +1045,14 @@ def _check_income_tax_rule(
 
     effective_credits = credit_points or 0.0
     pension_credit = abs(provident_funds_deduction or 0.0) * _PENSION_TAX_CREDIT_RATE  # Section 45a
-    estimated_tax = (
-        gross_base * _INCOME_TAX_MARGINAL_RATE
+    # Phase 8: two-bracket computation
+    tax_before_credits = (
+        min(gross_base, _INCOME_TAX_BRACKET_1_MAX) * _INCOME_TAX_MARGINAL_RATE
+        + max(0.0, min(gross_base, _INCOME_TAX_BRACKET_2_MAX) - _INCOME_TAX_BRACKET_1_MAX)
+          * _INCOME_TAX_BRACKET_2_RATE
+    )
+    estimated_tax = max(0.0,
+        tax_before_credits
         - effective_credits * _CREDIT_POINT_TAX_VALUE
         - pension_credit
     )
@@ -1057,7 +1092,8 @@ def _check_income_tax_rule(
                 f"(ברוטו {gross_base:,.0f}₪, {effective_credits:.2f} נקודות זיכוי)"
             ),
             why_suspicious=(
-                f"לפי אמדן ראשוני (ברוטו × 10% פחות זיכויים וזיכוי פנסיה סעיף 45א), "
+                f"לפי מדרגות מס הכנסה 2025 (10% עד ₪7,010 + 14% עד ₪10,060) "
+                f"פחות זיכויי נקודות וזיכוי פנסיה סעיף 45א, "
                 f"מס ההכנסה הצפוי הוא כ-₪{estimated_tax:,.0f} לחודש. "
                 "אי-הופעת מס הכנסה בתלוש עשויה להצביע על שגיאה בחישוב או בזיהוי."
             ),
@@ -1091,22 +1127,27 @@ def _run_extended_checks(
     answers: object | None,
     gross_taxable: float | None = None,
     provident_funds_deduction: float | None = None,
+    gross_ni: float | None = None,           # Phase 8: for exact NI/health bracket calc
+    pension_employee: float | None = None,   # Phase 8: reserved
 ) -> list:
     """
-    Extended rule-engine checks (Phase 4, updated Phase 6, Phase 7.1).
+    Extended rule-engine checks (Phase 4 → Phase 8).
     Returns list of Anomaly objects (Warning/Info severity).
     Critical anomalies are still handled by _build_anomalies_from_real_data().
 
     Rules:
-      A  — Income tax: smart threshold check w/ Section 45a pension credit (Phase 7.1)
+      A  — Income tax: 2025 multi-bracket check w/ Section 45a pension credit (Phase 8)
       A2 — Missing national_ins AND health → Warning (regardless of income_tax)
       B  — Credit points too low (<2.0) → Info; too high (>8.0) → Warning
       C  — net_to_pay vs. net_salary gap > ₪50 → Info
       D  — Pension (employee) rate out of range → Warning
       E  — No gross found → Info (cannot validate math)
       F  — Employer pension contribution rate out of expected range [6.5%–8.5%] → Warning
-      G  — National Insurance rate out of expected range [2%–15%] → Warning
-      H  — Health tax rate out of expected range [1.5%–6.5%] → Warning
+      G  — NI: exact 2025/2026 bracket check (replaces crude bounds) → Warning
+      H  — Health: exact 2025/2026 bracket check (replaces crude bounds) → Warning
+      I  — Employee pension minimum 6% vs. "שכר לקצבה"/"שכר בסיס" base → Warning
+      J  — Section 14 / Severance detection (employer_contribution פיצויים) → Info
+      K  — Convalescence pay rate ≥ ₪418/day legal minimum → Warning
     """
     from app.models.schemas import Anomaly, AnomalySeverity, LineItemCategory
 
@@ -1287,56 +1328,261 @@ def _run_extended_checks(
                 ))
 
     # ------------------------------------------------------------------
-    # Rule G: National Insurance rate sanity check → Warning
-    # Uses summary.national_insurance / gross (or gross_ni as proxy if available)
+    # Rule G: National Insurance — exact 2025/2026 bracket computation (Phase 8)
+    # Replaces crude rate-bounds check. Uses gross_ni (preferred) or gross as base.
+    # Tolerances: abs diff > ₪20 AND percentage > 5% → warn
+    # Anomaly ID: "ano_national_insurance_bracket_mismatch"
     # ------------------------------------------------------------------
-    if gross is not None and gross > 0 and national_ins is not None and national_ins > 0:
-        # Use gross directly (gross_ni not passed here; gross is already fallback-resolved)
-        ni_rate = national_ins / gross
-        if ni_rate < _NI_RATE_MIN or ni_rate > _NI_RATE_MAX:
+    ni_base = gross_ni if gross_ni is not None else gross
+    if ni_base is not None and ni_base > 0 and national_ins is not None and national_ins > 0:
+        if ni_base <= _NI_BRACKET_THRESHOLD:
+            expected_ni = ni_base * _NI_RATE_LOW
+        else:
+            expected_ni = (
+                _NI_BRACKET_THRESHOLD * _NI_RATE_LOW
+                + (ni_base - _NI_BRACKET_THRESHOLD) * _NI_RATE_HIGH
+            )
+        ni_diff = abs(national_ins - expected_ni)
+        ni_pct  = ni_diff / expected_ni if expected_ni > 0 else 0.0
+        if ni_diff > _INCOME_TAX_NOISE_FLOOR and ni_pct > 0.05:
+            bracket_desc = (
+                "1.04% (מתחת לתקרה)"
+                if ni_base <= _NI_BRACKET_THRESHOLD
+                else "1.04% עד ₪7,522 + 7.00% מעל התקרה"
+            )
             anomalies.append(Anomaly(
-                id="ano_national_insurance_rate_unusual",
+                id="ano_national_insurance_bracket_mismatch",
                 severity=AnomalySeverity.WARNING,
                 what_we_found=(
-                    f"ביטוח לאומי: {ni_rate:.1%} מהשכר "
-                    f"({national_ins:,.0f}₪ מתוך {gross:,.0f}₪) — צפוי 3.5%–12%"
+                    f"ביטוח לאומי: ₪{national_ins:,.0f} בפועל — צפוי ₪{expected_ni:,.0f} "
+                    f"לפי מדרגות 2025/2026 (בסיס ₪{ni_base:,.0f})"
                 ),
                 why_suspicious=(
-                    "שיעור ביטוח לאומי החורג מהטווח הצפוי (2%–15%) עשוי להצביע על שגיאת זיהוי. "
-                    "השיעור המקובל הוא כ-3.5% על הכנסה מתחת לתקרה ו-12% מעליה."
+                    f"לפי חישוב מדרגות ביטוח לאומי 2025/2026: {bracket_desc}. "
+                    f"הפרש: ₪{ni_diff:,.0f} ({ni_pct:.0%}) — חורג מסף הדיוק המותר."
                 ),
                 what_to_do=(
                     "השווה את סכום ביטוח הלאומי בתלוש הפיזי. "
                     "אם הסכום שגוי, ניתן לתקן אותו ידנית בממשק התיקונים."
                 ),
-                ask_payroll="האם ניכוי ביטוח הלאומי תואם את הרשום בתלוש?",
+                ask_payroll="האם ניכוי ביטוח הלאומי תואם את חישוב מדרגות 2025/2026?",
                 related_line_item_ids=[],
             ))
 
     # ------------------------------------------------------------------
-    # Rule H: Health tax rate sanity check → Warning
-    # Uses summary.health_insurance / gross
+    # Rule H: Health tax — exact 2025/2026 bracket computation (Phase 8)
+    # Same ni_base as Rule G. Anomaly ID: "ano_health_tax_bracket_mismatch"
     # ------------------------------------------------------------------
-    if gross is not None and gross > 0 and health is not None and health > 0:
-        health_rate = health / gross
-        if health_rate < _HEALTH_RATE_MIN or health_rate > _HEALTH_RATE_MAX:
+    if ni_base is not None and ni_base > 0 and health is not None and health > 0:
+        if ni_base <= _NI_BRACKET_THRESHOLD:
+            expected_health = ni_base * _HEALTH_RATE_LOW
+        else:
+            expected_health = (
+                _NI_BRACKET_THRESHOLD * _HEALTH_RATE_LOW
+                + (ni_base - _NI_BRACKET_THRESHOLD) * _HEALTH_RATE_HIGH
+            )
+        health_diff = abs(health - expected_health)
+        health_pct  = health_diff / expected_health if expected_health > 0 else 0.0
+        if health_diff > _INCOME_TAX_NOISE_FLOOR and health_pct > 0.05:
+            health_bracket_desc = (
+                "3.23% (מתחת לתקרה)"
+                if ni_base <= _NI_BRACKET_THRESHOLD
+                else "3.23% עד ₪7,522 + 5.17% מעל התקרה"
+            )
             anomalies.append(Anomaly(
-                id="ano_health_tax_rate_unusual",
+                id="ano_health_tax_bracket_mismatch",
                 severity=AnomalySeverity.WARNING,
                 what_we_found=(
-                    f"מס בריאות: {health_rate:.1%} מהשכר "
-                    f"({health:,.0f}₪ מתוך {gross:,.0f}₪) — צפוי 1.5%–6.5%"
+                    f"מס בריאות: ₪{health:,.0f} בפועל — צפוי ₪{expected_health:,.0f} "
+                    f"לפי מדרגות 2025/2026 (בסיס ₪{ni_base:,.0f})"
                 ),
                 why_suspicious=(
-                    "שיעור מס בריאות החורג מהטווח הצפוי (1.5%–6.5%) עשוי להצביע על שגיאת זיהוי. "
-                    "השיעור הסטנדרטי הוא 3.1% מתחת לתקרה ו-5% מעליה."
+                    f"לפי חישוב מדרגות מס בריאות 2025/2026: {health_bracket_desc}. "
+                    f"הפרש: ₪{health_diff:,.0f} ({health_pct:.0%}) — חורג מסף הדיוק המותר."
                 ),
                 what_to_do=(
                     "השווה את סכום מס הבריאות בתלוש הפיזי. "
                     "אם הסכום שגוי, ניתן לתקן אותו ידנית בממשק התיקונים."
                 ),
-                ask_payroll="האם ניכוי מס הבריאות תואם את הרשום בתלוש?",
+                ask_payroll="האם ניכוי מס הבריאות תואם את חישוב מדרגות 2025/2026?",
                 related_line_item_ids=[],
+            ))
+
+    # ------------------------------------------------------------------
+    # Rule I: Employee pension minimum (6%) vs. pension base salary (Phase 8)
+    # ONLY fires when a "שכר לקצבה" / "שכר בסיס" / "משכורת בסיס" EARNING item is found.
+    # Do NOT use gross as base — it includes overtime/travel not in pension base.
+    # ------------------------------------------------------------------
+    pension_base_item = next(
+        (li for li in line_items
+         if str(getattr(li, "category", "")) in ("earning", "LineItemCategory.EARNING")
+         and any(kw in getattr(li, "description_hebrew", "")
+                 for kw in ("שכר לקצבה", "שכר בסיס", "משכורת בסיס"))
+         and li.value is not None and li.value > 0),
+        None,
+    )
+    if pension_base_item is not None:
+        pension_base_salary = pension_base_item.value
+        employee_pension_item = next(
+            (li for li in line_items
+             if str(getattr(li, "category", "")) in ("deduction", "LineItemCategory.DEDUCTION")
+             and any(kw in getattr(li, "description_hebrew", "")
+                     for kw in ("פנסיה", "קרן פנסיה", "קופת גמל", "תגמולים"))
+             and "השתלמות" not in getattr(li, "description_hebrew", "")
+             and li.value is not None),
+            None,
+        )
+        if (employee_pension_item is not None
+                and pension_base_salary is not None
+                and pension_base_salary > 0):
+            emp_pension_abs = abs(employee_pension_item.value)
+            emp_pension_rate = emp_pension_abs / pension_base_salary
+            if emp_pension_rate < _PENSION_EMPLOYEE_RATE_MIN_P8:
+                anomalies.append(Anomaly(
+                    id="ano_pension_employee_below_minimum",
+                    severity=AnomalySeverity.WARNING,
+                    what_we_found=(
+                        f"שיעור ניכוי פנסיה עובד: {emp_pension_rate:.1%} משכר הבסיס לקצבה "
+                        f"({emp_pension_abs:,.0f}₪ מתוך ₪{pension_base_salary:,.0f}) — "
+                        "מינימום חוקי: 6%"
+                    ),
+                    why_suspicious=(
+                        "לפי חוק פנסיה חובה בישראל, שיעור תגמולי עובד הוא לפחות 6% משכר הבסיס לקצבה. "
+                        f"השיעור שנמצא ({emp_pension_rate:.1%}) נמוך מהמינימום החוקי."
+                    ),
+                    what_to_do=(
+                        "בדוק עם מחלקת שכר את שיעור ניכוי הפנסיה הנכון עבורך. "
+                        "ייתכן שיש הסכם מיוחד, אך בדרך כלל שיעור זה אינו תקין."
+                    ),
+                    ask_payroll="מדוע שיעור ניכוי הפנסיה שלי נמוך מ-6% משכר הבסיס לקצבה?",
+                    related_line_item_ids=[
+                        getattr(employee_pension_item, "id", ""),
+                        getattr(pension_base_item, "id", ""),
+                    ],
+                ))
+    else:
+        pension_base_salary = None  # used by Rule J below
+
+    # ------------------------------------------------------------------
+    # Rule J: Section 14 / Severance detection (Phase 8)
+    # Looks for employer_contribution item with פיצויים keywords.
+    # Emits Info if Section 14 rate (8.33%) or standard rate (6%) detected.
+    # If NO severance item found but other employer_contribution items exist → Info.
+    # ------------------------------------------------------------------
+    severance_item = next(
+        (li for li in line_items
+         if str(getattr(li, "category", "")) in (
+             "employer_contribution", "LineItemCategory.EMPLOYER_CONTRIBUTION"
+         )
+         and any(kw in getattr(li, "description_hebrew", "")
+                 for kw in ("פיצויים", "קרן פיצוי", "הפרשה לפיצויים"))
+         and li.value is not None),
+        None,
+    )
+    severance_base = pension_base_salary if pension_base_salary else gross
+
+    if severance_item is not None and severance_item.value is not None and severance_base:
+        sev_rate = abs(severance_item.value) / severance_base
+        if abs(sev_rate - _SEVERANCE_RATE_8_33) <= _SEVERANCE_RATE_TOLERANCE:
+            anomalies.append(Anomaly(
+                id="ano_section14_detected",
+                severity=AnomalySeverity.INFO,
+                what_we_found=(
+                    f"הפרשה לפיצויים: {sev_rate:.1%} — מזוהה סעיף 14 לחוק פיצויי פיטורין"
+                ),
+                why_suspicious=(
+                    "הפרשה בשיעור 8.33% מרמזת על חתימה על סעיף 14. "
+                    "במסגרת סעיף 14 כספי הפיצויים שייכים לך גם אם תפוטר, "
+                    "אולם ייתכן ויתור על תביעות פיצויים נוספות."
+                ),
+                what_to_do="בדוק אם חתמת על הסכם סעיף 14 ומהן ההשלכות עבורך.",
+                ask_payroll="האם אני חתום/ה על הסכם סעיף 14? מה משמעותו עבורי?",
+                related_line_item_ids=[getattr(severance_item, "id", "")],
+            ))
+        elif abs(sev_rate - _SEVERANCE_RATE_6) <= _SEVERANCE_RATE_TOLERANCE:
+            anomalies.append(Anomaly(
+                id="ano_standard_severance_detected",
+                severity=AnomalySeverity.INFO,
+                what_we_found=f"הפרשה לפיצויים: {sev_rate:.1%} — שיעור פיצויים סטנדרטי (6%)",
+                why_suspicious=(
+                    "הפרשה בשיעור 6% היא השיעור המחויב בחוק פיצויי פיטורין. "
+                    "אין סימן לסעיף 14."
+                ),
+                what_to_do="בדוק מה ההסדר שלך לגבי פיצויי פיטורין עם המעסיק.",
+                ask_payroll="מה הסדר הפיצויים שלי — האם אני מכוסה/ת בסעיף 14?",
+                related_line_item_ids=[getattr(severance_item, "id", "")],
+            ))
+        # else: non-standard rate — no anomaly (legitimate arrangement)
+    else:
+        # No severance item found — emit Info only if other employer_contribution items exist
+        # (proves the section was parsed; guards against OCR extraction failure)
+        has_employer_items = any(
+            str(getattr(li, "category", "")) in (
+                "employer_contribution", "LineItemCategory.EMPLOYER_CONTRIBUTION"
+            )
+            for li in line_items
+        )
+        if has_employer_items:
+            anomalies.append(Anomaly(
+                id="ano_severance_not_detected",
+                severity=AnomalySeverity.INFO,
+                what_we_found="לא זוהתה הפרשה לפיצויים בסעיף הפרשות מעסיק",
+                why_suspicious=(
+                    "הפרשות מעסיק נמצאו בתלוש, אך לא נמצאה שורת פיצויים. "
+                    "ייתכן שהמעסיק מפריש לפיצויים תחת שם שונה, או שהתלוש לא מציג זאת."
+                ),
+                what_to_do=(
+                    "בדוק מול מחלקת השכר מה הסדר הפיצויים שלך "
+                    "ולאיזו קרן הם מועברים."
+                ),
+                ask_payroll="היכן ואיך מפורטת ההפרשה לפיצויים שלי? האם אני מכוסה/ת בסעיף 14?",
+                related_line_item_ids=[],
+            ))
+
+    # ------------------------------------------------------------------
+    # Rule K: Convalescence pay rate (דמי הבראה) — ₪418/day legal minimum (Phase 8)
+    # Uses LineItem.rate (תעריף) first, then derives from value/quantity (כמות).
+    # Skips silently if neither rate nor quantity is available (no false positives).
+    # ------------------------------------------------------------------
+    convalescence_item = next(
+        (li for li in line_items
+         if str(getattr(li, "category", "")) in ("earning", "LineItemCategory.EARNING")
+         and "הבראה" in getattr(li, "description_hebrew", "")
+         and li.value is not None),
+        None,
+    )
+    if convalescence_item is not None:
+        conv_value = abs(convalescence_item.value)
+        conv_rate_field  = getattr(convalescence_item, "rate", None)
+        conv_qty_field   = getattr(convalescence_item, "quantity", None)
+
+        implied_rate: float | None = None
+        if conv_rate_field is not None and conv_rate_field > 0:
+            implied_rate = conv_rate_field
+        elif conv_qty_field is not None and conv_qty_field > 0 and conv_value > 0:
+            implied_rate = conv_value / conv_qty_field
+
+        if implied_rate is not None and implied_rate < _CONVALESCENCE_DAILY_RATE_MIN:
+            anomalies.append(Anomaly(
+                id="ano_convalescence_rate_low",
+                severity=AnomalySeverity.WARNING,
+                what_we_found=(
+                    f"תעריף יום הבראה: ₪{implied_rate:,.2f} — "
+                    f"נמוך מהמינימום החוקי (₪{_CONVALESCENCE_DAILY_RATE_MIN:.0f})"
+                ),
+                why_suspicious=(
+                    f"תעריף יום הבראה נמוך מהקבוע בחוק (₪{_CONVALESCENCE_DAILY_RATE_MIN:.0f} "
+                    f"למגזר הפרטי). נמצא תעריף של ₪{implied_rate:,.2f}."
+                ),
+                what_to_do=(
+                    f"בדוק עם מחלקת שכר שתעריף ההבראה עדכני. "
+                    f"המינימום החוקי הוא ₪{_CONVALESCENCE_DAILY_RATE_MIN:.0f} ליום."
+                ),
+                ask_payroll=(
+                    f"מה תעריף יום ההבראה שלי? "
+                    f"המינימום החוקי הוא ₪{_CONVALESCENCE_DAILY_RATE_MIN:.0f}."
+                ),
+                related_line_item_ids=[getattr(convalescence_item, "id", "")],
             ))
 
     # ------------------------------------------------------------------
@@ -1378,6 +1624,8 @@ def _build_anomalies_from_real_data(
     answers: object | None = None,
     gross_taxable: float | None = None,
     provident_funds_deduction: float | None = None,
+    gross_ni: float | None = None,           # Phase 8: for exact NI/health bracket calc
+    pension_employee: float | None = None,   # Phase 8: reserved
 ) -> list:
     """
     Build Anomaly objects for integrity failures detected from real extracted values.
@@ -1424,6 +1672,8 @@ def _build_anomalies_from_real_data(
         answers=answers,
         gross_taxable=gross_taxable,
         provident_funds_deduction=provident_funds_deduction,
+        gross_ni=gross_ni,
+        pension_employee=pension_employee,
     ))
 
     return anomalies
@@ -1971,6 +2221,29 @@ def _classify_line_item(
         # Likely an annual accumulation — use the next largest
         amount = amounts_sorted[1]
 
+    # Phase 8: attempt to extract quantity (כמות) and rate (תעריף) from multi-column rows.
+    # Israeli payslip column order (RTL, as Tesseract renders it):
+    #   TOTAL | RATE | QTY | CODE | DESCRIPTION
+    # amounts_sorted[0] = total (largest), [1] = rate, [2] = qty.
+    quantity: float | None = None
+    rate_val: float | None = None
+    if len(amounts_sorted) >= 3:
+        # 3+ amounts: layout is [total, rate, qty]
+        rate_candidate = amounts_sorted[1]
+        qty_candidate  = amounts_sorted[2]
+        # Sanity: qty must be in plausible range [0.01, 365]
+        if 0.01 <= qty_candidate <= 365:
+            quantity = qty_candidate
+            rate_val = rate_candidate
+    elif len(amounts_sorted) == 2:
+        # 2 amounts: [total, X] — X could be qty or rate
+        second = amounts_sorted[1]
+        if second > 0 and amounts_sorted[0] > 0:
+            implied_qty = amounts_sorted[0] / second
+            if 0.01 <= implied_qty <= 365:
+                quantity = round(implied_qty, 3)
+                rate_val = second
+
     # Step 5: return labeled item if keyword matched
     if matched_keyword is not None:
         _kw_pattern, category_str, display_name, explanation = matched_keyword
@@ -1994,6 +2267,8 @@ def _classify_line_item(
             confidence=_LI_CONF_KNOWN,
             page_index=page_index,
             is_unknown=False,
+            quantity=quantity,
+            rate=rate_val,
         )
 
     # Step 6: unknown item — build best-guess guesses from keywords present
@@ -2025,6 +2300,8 @@ def _classify_line_item(
         is_unknown=True,
         unknown_guesses=guesses,
         unknown_question="מהו רכיב שכר זה ומה הוא מייצג? כיצד הוא מחושב?",
+        quantity=quantity,
+        rate=rate_val,
     )
 
 
@@ -2707,6 +2984,8 @@ def parse_with_ocr(
     # Phase 7.1: pass gross_taxable and provident_funds_deduction for Section 45a pension credit
     _gross_taxable_val      = gross_taxable_field.value      if gross_taxable_field      else None
     _provident_funds_val    = provident_funds_field.value    if provident_funds_field     else None
+    # Phase 8: pass gross_ni for exact NI/health bracket computation in Rules G/H
+    _gross_ni_val           = gross_ni_field.value           if gross_ni_field           else None
 
     anomalies: list[Anomaly] = _build_anomalies_from_real_data(  # type: ignore[assignment]
         gross, net, integrity_ok, integrity_notes,
@@ -2720,6 +2999,7 @@ def parse_with_ocr(
         answers=answers,
         gross_taxable=_gross_taxable_val,
         provident_funds_deduction=_provident_funds_val,
+        gross_ni=_gross_ni_val,
     )
 
     extracted_confs = [f.confidence for f in [net_field, gross_field] if f is not None]
