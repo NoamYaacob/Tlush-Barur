@@ -266,3 +266,335 @@ def test_tlush1_summary_boxes_extracted_and_income_tax_false_positive_rejected()
     credits = extract_field(pages_text, "tax_credits", FIELD_PATTERNS_OCR.get("tax_credits", []))
     assert credits is not None, "tax_credits should be found"
     assert abs(credits.value - 2.25) < 0.1, f"Expected 2.25, got {credits.value}"
+
+
+# ===========================================================================
+# Test 5: find_amount_near_label — label and amount on different lines
+#         (mirrors the real tlush1.jpg Tesseract output structure)
+# ===========================================================================
+
+# Synthetic snippet where the three hard fields have label and amount split
+# across adjacent lines, matching the Tesseract line-order observed for tlush1.jpg:
+#   - ניכויי תחובה.- מסים  (label, line N) / (334.00) (2 lines later)
+#   - ניכויים שונים        (label, line N) / 16.00    (1 line later)
+#   - נטלתשלום             (label, line N) / 5,354.20 (1 line later)
+_TLUSH1_SPLIT_LINES_SAMPLE = """\
+תלוש שכר לחודש ?נואר 2026
+חברה לדוגמה בע"מ
+
+= 291250 VI TS). ניכויי תחובה.- מסים
+|
+_ wan סכומים מצטברים לשנת (334.00)
+
+6 שונים סו BHD טהב
+16.00
+
+\\ פיוך בונך 13 נטלתשלום
+5,354.20
+"""
+
+
+def test_find_amount_near_label_line_split():
+    """
+    Verifies that find_amount_near_label_pages() and extract_ocr_near_label()
+    correctly bridge the gap when Tesseract splits a Hebrew label and its
+    monetary amount across adjacent OCR lines.
+
+    Specifically:
+      - mandatory_taxes_total: label "ניכויי תחובה.- מסים" 2 lines before (334.00)
+      - other_deductions: label "שונים" 1 line before 16.00
+      - net_to_pay: label "נטלתשלום" 1 line before 5,354.20
+    """
+    from app.services.parser import (
+        FIELD_PATTERNS_OCR,
+        _LABEL_RE_MANDATORY_TAXES,
+        _LABEL_RE_NET_TO_PAY,
+        _LABEL_RE_OTHER_DEDUCTIONS,
+        _NEAR_CONF_ADJACENT,
+        _NEAR_CONF_NEAR,
+        extract_field,
+        extract_ocr_near_label,
+        find_amount_near_label_pages,
+    )
+
+    pages_text = {0: _TLUSH1_SPLIT_LINES_SAMPLE}
+
+    # --- mandatory_taxes_total: value is 2 lines after label ---
+    mtt_direct = extract_field(pages_text, "mandatory_taxes_total",
+                               FIELD_PATTERNS_OCR.get("mandatory_taxes_total", []))
+    mtt = extract_ocr_near_label(pages_text, _LABEL_RE_MANDATORY_TAXES, mtt_direct)
+    assert mtt is not None, "mandatory_taxes_total should be found via near-label search"
+    assert abs(mtt.value - 334.00) < 1.0, f"Expected 334.00, got {mtt.value}"
+    assert mtt.confidence <= _NEAR_CONF_NEAR + 0.01, (
+        f"Confidence for delta-2 should be <= {_NEAR_CONF_NEAR}, got {mtt.confidence}"
+    )
+
+    # --- other_deductions: value is 1 line after label ---
+    oded_direct = extract_field(pages_text, "other_deductions",
+                                FIELD_PATTERNS_OCR.get("other_deductions", []))
+    oded = extract_ocr_near_label(pages_text, _LABEL_RE_OTHER_DEDUCTIONS, oded_direct)
+    assert oded is not None, "other_deductions should be found via near-label search"
+    assert abs(oded.value - 16.00) < 1.0, f"Expected 16.00, got {oded.value}"
+    assert oded.confidence <= _NEAR_CONF_ADJACENT + 0.01, (
+        f"Confidence for delta-1 should be <= {_NEAR_CONF_ADJACENT}, got {oded.confidence}"
+    )
+
+    # --- net_to_pay: value is 1 line after label ---
+    ntp_direct = extract_field(pages_text, "net_to_pay",
+                               FIELD_PATTERNS_OCR.get("net_to_pay", []))
+    ntp = extract_ocr_near_label(pages_text, _LABEL_RE_NET_TO_PAY, ntp_direct)
+    assert ntp is not None, "net_to_pay should be found via near-label search"
+    assert abs(ntp.value - 5354.20) < 1.0, f"Expected 5354.20, got {ntp.value}"
+    assert ntp.confidence <= _NEAR_CONF_ADJACENT + 0.01, (
+        f"Confidence for delta-1 should be <= {_NEAR_CONF_ADJACENT}, got {ntp.confidence}"
+    )
+
+    # Also verify that find_amount_near_label_pages() is directly accessible
+    raw_mtt = find_amount_near_label_pages(pages_text, _LABEL_RE_MANDATORY_TAXES)
+    assert raw_mtt is not None
+    assert abs(raw_mtt.value - 334.00) < 1.0
+
+
+# ===========================================================================
+# Test 6: extract_net_to_pay_ocr — computed fallback (net_salary - other_deductions)
+# ===========================================================================
+
+def test_net_to_pay_computed_fallback():
+    """
+    When the proximity search for 'נטלתשלום' returns net_salary (same value),
+    and other_deductions > 0, extract_net_to_pay_ocr() should compute
+    net_to_pay = net_salary - other_deductions and add an integrity note.
+
+    Scenario mirrors the real tlush1.jpg OCR:
+      net_salary = 5370.20, other_deductions = 16.00 → net_to_pay = 5354.20
+    """
+    from app.services.parser import (
+        ExtractedField, extract_net_to_pay_ocr,
+        _NEAR_CONF_ADJACENT,
+    )
+
+    # Minimal pages_text with the net-to-pay label present but no adjacent amount
+    # (the proximity scan finds nothing useful).
+    pages_text = {0: "שכר נטו 5,370.20\nפיוך 13 נטלתשלום\n"}
+
+    net_salary_f = ExtractedField(value=5370.20, raw_text="שכר נטו 5,370.20",
+                                  confidence=0.64, source_page=0)
+    other_ded_f  = ExtractedField(value=16.00, raw_text="ניכויים 16.00",
+                                  confidence=_NEAR_CONF_ADJACENT, source_page=0)
+
+    result, notes = extract_net_to_pay_ocr(pages_text, None, net_salary_f, other_ded_f)
+
+    assert result is not None, "Should produce a computed net_to_pay"
+    assert abs(result.value - 5354.20) < 0.01, (
+        f"Expected 5354.20 (5370.20 - 16.00), got {result.value}"
+    )
+    assert result.confidence == 0.50, (
+        f"Computed fallback confidence should be 0.50, got {result.confidence}"
+    )
+    assert notes == ["נטו לתשלום חושב כנטו פחות ניכויים שונים"], (
+        f"Expected integrity note, got {notes}"
+    )
+
+
+def test_net_to_pay_no_other_deductions_uses_net_salary():
+    """
+    When other_deductions is None, extract_net_to_pay_ocr() should return
+    net_salary unchanged (no computation, no extra notes).
+    """
+    from app.services.parser import ExtractedField, extract_net_to_pay_ocr
+
+    pages_text = {0: "שכר נטו 5,370.20\nנטלתשלום\n"}
+
+    net_salary_f = ExtractedField(value=5370.20, raw_text="שכר נטו 5,370.20",
+                                  confidence=0.64, source_page=0)
+
+    result, notes = extract_net_to_pay_ocr(pages_text, None, net_salary_f, None)
+
+    assert result is not None, "Should return net_salary as fallback"
+    assert abs(result.value - 5370.20) < 0.01, (
+        f"Expected 5370.20 (same as net_salary), got {result.value}"
+    )
+    assert notes == [], f"No extra notes expected, got {notes}"
+
+
+# ===========================================================================
+# Test 7: extract_line_items_ocr — earnings table extraction
+# ===========================================================================
+
+# Synthetic OCR text mirroring the real tlush1.jpg OCR output structure.
+# Contains the "פרוט התשלומים" anchor followed by earnings rows,
+# then a stop anchor ("ניכויי חובה"), followed by employer-contribution rows.
+# Earnings lines mirror the garbled-but-parseable style from Tesseract RTL OCR.
+_TLUSH1_TABLE_SAMPLE = """\
+תלוש שכר לחודש ?נואר 2026
+חברה לדוגמה בע"מ
+
+js 7 : פרוט התשלומים
+משכורת שבת * 0025 76.50 67.755 592.90
+| ed mn 462.20 17.25 63.75 125% שעות
+= — שעות הפסקה+ 51.00 15.50 280.50
+LN had Ahad 157.00 497.50 הבראה חודשי
+נסיעות חודשי 380.00
+
+ניכויי חובה - מסים 334.00
+ביטוח לאומי 253.00
+מס בריאות 81.00
+
+קופות גמל מעסיק:
+פיצויים מעסיק 519.50
+"""
+
+
+def test_extract_line_items_ocr_earnings():
+    """
+    Phase 2D.2: extract_line_items_ocr() must find at least 5 earnings items
+    from a payslip OCR text containing the 'פרוט התשלומים' table.
+
+    Uses a synthetic OCR snippet that mirrors the garbled-but-parseable
+    style of the real tlush1.jpg Tesseract output.
+    """
+    from app.services.parser import extract_line_items_ocr
+    from app.models.schemas import LineItemCategory
+
+    pages_text = {0: _TLUSH1_TABLE_SAMPLE}
+    items = extract_line_items_ocr(pages_text)
+
+    # Must have at least 5 items total
+    assert len(items) >= 5, (
+        f"Expected >= 5 line items, got {len(items)}: {[li.description_hebrew for li in items]}"
+    )
+
+    earnings = [li for li in items if li.category == LineItemCategory.EARNING]
+    assert len(earnings) >= 5, (
+        f"Expected >= 5 earning items, got {len(earnings)}: {[li.description_hebrew for li in earnings]}"
+    )
+
+    # All earnings must have positive values
+    for li in earnings:
+        assert li.value is not None and li.value > 0, (
+            f"Earning '{li.description_hebrew}' should have positive value, got {li.value}"
+        )
+
+    # Specific items we know should be extracted
+    descs = {li.description_hebrew for li in earnings}
+    assert "משכורת שבת" in descs, f"Expected 'משכורת שבת' in earnings, got {descs}"
+    assert "שעות נוספות" in descs, f"Expected 'שעות נוספות' in earnings, got {descs}"
+    assert "דמי הבראה" in descs, f"Expected 'דמי הבראה' in earnings, got {descs}"
+
+    # All items must have confidence > 0
+    for li in items:
+        assert li.confidence > 0, f"Item {li.id} has zero confidence"
+
+
+def test_extract_line_items_ocr_deductions():
+    """
+    Phase 2D.2: extract_line_items_ocr() must correctly classify deductions
+    found in the payslip OCR text.
+
+    The deductions section starts after the stop anchor 'ניכויי חובה'.
+    However, extract_line_items_ocr() only parses lines INSIDE the table region.
+    The deduction rows (national_ins, health) appear AFTER the stop anchor,
+    so they are not extracted by extract_line_items_ocr() from the table.
+
+    This test verifies the FULL pipeline behavior: parse_with_ocr supplements
+    the table items with summary-box deduction rows.
+
+    For unit testing extract_line_items_ocr() alone, we embed deduction rows
+    INSIDE the table region (before any stop anchor).
+    """
+    from app.services.parser import extract_line_items_ocr
+    from app.models.schemas import LineItemCategory
+
+    # Embed deduction rows inside the table region (no stop anchor)
+    sample = """\
+פרוט התשלומים
+משכורת בסיס 5,000.00
+נסיעות 380.00
+מס הכנסה 334.00
+ביטוח לאומי 253.00
+מס בריאות 81.00
+קופות גמל 519.50
+"""
+    pages_text = {0: sample}
+    items = extract_line_items_ocr(pages_text)
+
+    deductions = [li for li in items if li.category == LineItemCategory.DEDUCTION]
+    assert len(deductions) >= 2, (
+        f"Expected >= 2 deduction items, got {len(deductions)}: "
+        f"{[li.description_hebrew for li in deductions]}"
+    )
+
+    # Deduction values should be negative
+    for li in deductions:
+        assert li.value is not None and li.value < 0, (
+            f"Deduction '{li.description_hebrew}' should have negative value, got {li.value}"
+        )
+
+    ded_descs = {li.description_hebrew for li in deductions}
+    assert "ביטוח לאומי (עובד)" in ded_descs or "מס הכנסה" in ded_descs, (
+        f"Expected at least one of ביטוח לאומי / מס הכנסה in deductions, got {ded_descs}"
+    )
+
+
+def test_extract_line_items_ocr_no_anchor_fallback():
+    """
+    When the 'פרוט התשלומים' anchor is not found, extract_line_items_ocr()
+    should fall back to scanning the full page for any recognizable items.
+    """
+    from app.services.parser import extract_line_items_ocr
+
+    # Page with no anchor but recognizable item
+    sample = """\
+תלוש שכר
+משכורת בסיס 5,000.00
+ביטוח לאומי 253.00
+"""
+    pages_text = {0: sample}
+    items = extract_line_items_ocr(pages_text)
+
+    # Should find at least 2 items even without anchor
+    assert len(items) >= 2, (
+        f"Expected >= 2 items from fallback scan, got {len(items)}"
+    )
+
+
+def test_extract_line_items_ocr_dedup():
+    """
+    Duplicate rows (same description + same amount) should be deduplicated.
+    """
+    from app.services.parser import extract_line_items_ocr
+
+    # Two identical lines — should produce only one item
+    sample = """\
+פרוט התשלומים
+משכורת בסיס 5,000.00
+משכורת בסיס 5,000.00
+"""
+    pages_text = {0: sample}
+    items = extract_line_items_ocr(pages_text)
+
+    by_desc = [li for li in items if li.description_hebrew == "משכורת בסיס"]
+    assert len(by_desc) == 1, (
+        f"Expected 1 deduplicated 'משכורת בסיס' item, got {len(by_desc)}"
+    )
+
+
+def test_extract_line_items_ocr_unknown_item():
+    """
+    Lines that don't match any known keyword should be returned as unknown items.
+    """
+    from app.services.parser import extract_line_items_ocr
+
+    sample = """\
+פרוט התשלומים
+רכיב מיוחד XYZ 250.00
+"""
+    pages_text = {0: sample}
+    items = extract_line_items_ocr(pages_text)
+
+    unknown = [li for li in items if li.is_unknown]
+    assert len(unknown) >= 1, (
+        f"Expected at least 1 unknown item, got {len(unknown)}"
+    )
+    assert unknown[0].unknown_question is not None, "Unknown item should have a question"
+    assert len(unknown[0].unknown_guesses) >= 1, "Unknown item should have guesses"

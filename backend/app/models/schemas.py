@@ -120,6 +120,9 @@ class Anomaly(BaseModel):
 
 class SectionBlock(BaseModel):
     section_name: str
+    section_type: str = "page"   # "earnings_table" | "deductions_section" |
+                                  # "contributions_section" | "ytd_section" |
+                                  # "balances_section" | "summary_box" | "page"
     bbox_json: Optional[dict[str, Any]] = None
     page_index: int = 0
     raw_text_preview: Optional[str] = None
@@ -130,6 +133,28 @@ class TaxCreditsDetected(BaseModel):
     estimated_monthly_value: Optional[float] = None
     confidence: float = 0.0
     notes: list[str] = Field(default_factory=list)
+
+
+class YTDMetrics(BaseModel):
+    """Year-to-date accumulated totals extracted from the payslip YTD section."""
+    gross_ytd: Optional[float] = None               # מצטבר ברוטו
+    net_ytd: Optional[float] = None                 # מצטבר נטו
+    income_tax_ytd: Optional[float] = None          # מצטבר מס הכנסה
+    national_insurance_ytd: Optional[float] = None  # מצטבר ביטוח לאומי
+    health_ytd: Optional[float] = None              # מצטבר מס בריאות
+    pension_ytd: Optional[float] = None             # מצטבר פנסיה
+    training_fund_ytd: Optional[float] = None       # מצטבר קרן השתלמות
+    confidence: float = 0.0
+
+
+class BalanceItem(BaseModel):
+    """A carry-forward balance: vacation days, sick days, training fund balance, etc."""
+    id: str
+    name_hebrew: str
+    balance_value: Optional[float] = None
+    unit: str = "unknown"   # "days" | "hours" | "ils" | "unknown"
+    confidence: float = 0.0
+    raw_text: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +179,9 @@ class ParsedSlipPayload(BaseModel):
     # Local-dev debug only. Populated when DEBUG_OCR_PREVIEW=true AND transient=true.
     # Contains: char count header + first ~30 OCR lines (digits redacted) + keyword hit list.
     # Max 2000 chars. NEVER contains raw full OCR text.
+    # Phase 3: YTD metrics and balance items
+    ytd: Optional[YTDMetrics] = None
+    balances: list[BalanceItem] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

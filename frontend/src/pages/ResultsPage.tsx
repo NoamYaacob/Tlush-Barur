@@ -439,11 +439,89 @@ function TaxCreditsTab({ result }: { result: ParsedSlipPayload }) {
   );
 }
 
-function YtdTab() {
+function YtdTab({ result }: { result: ParsedSlipPayload }) {
+  const { ytd, balances } = result;
+
+  // Empty state: no YTD section in this payslip (common — most slips don't have one)
+  if (!ytd && balances.length === 0) {
+    return (
+      <div className="text-center py-14 text-gray-400">
+        <div className="text-4xl mb-3">📊</div>
+        <p className="font-medium">לא נמצאו נתונים מצטברים בתלוש זה</p>
+        <p className="text-xs mt-2 text-gray-300">
+          נתונים מצטברים מופיעים רק בחלק מהתלושים
+        </p>
+      </div>
+    );
+  }
+
+  const ytdRows = [
+    { label: "ברוטו מצטבר",          value: ytd?.gross_ytd },
+    { label: "נטו מצטבר",             value: ytd?.net_ytd },
+    { label: "מס הכנסה מצטבר",       value: ytd?.income_tax_ytd },
+    { label: "ביטוח לאומי מצטבר",    value: ytd?.national_insurance_ytd },
+    { label: "מס בריאות מצטבר",      value: ytd?.health_ytd },
+    { label: "פנסיה מצטברת",          value: ytd?.pension_ytd },
+    { label: "קרן השתלמות מצטברת",   value: ytd?.training_fund_ytd },
+  ].filter((r) => r.value != null);
+
   return (
-    <div className="text-center py-14 text-gray-400">
-      <div className="text-4xl mb-3">📊</div>
-      <p>נתונים מצטברים יהיו זמינים בשלב הבא.</p>
+    <div className="space-y-4">
+      {/* YTD totals table */}
+      {ytd && ytdRows.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <h3 className="font-bold text-gray-700 mb-3 text-sm">מצטבר מתחילת השנה</h3>
+          <div className="space-y-2 text-sm">
+            {ytdRows.map((r) => (
+              <div
+                key={r.label}
+                className="flex justify-between items-center border-b border-gray-100 pb-1 last:border-0"
+              >
+                <span className="text-gray-600">{r.label}</span>
+                <span className="font-medium text-gray-800" dir="ltr">
+                  {fmt(r.value!)}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3">
+            <ConfidenceBadge value={ytd.confidence} />
+          </div>
+        </div>
+      )}
+
+      {/* Balance / carry-forward items */}
+      {balances.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <h3 className="font-bold text-gray-700 mb-3 text-sm">יתרות ואצירות</h3>
+          <div className="space-y-2 text-sm">
+            {balances.map((b) => (
+              <div
+                key={b.id}
+                className="flex justify-between items-center border-b border-gray-100 pb-1 last:border-0"
+              >
+                <span className="text-gray-600">{b.name_hebrew}</span>
+                <span className="font-medium text-gray-800" dir="ltr">
+                  {b.balance_value != null
+                    ? `${b.balance_value.toLocaleString("he-IL")} ${
+                        b.unit === "days"
+                          ? "ימים"
+                          : b.unit === "hours"
+                          ? "שעות"
+                          : "₪"
+                      }`
+                    : "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Disclaimer */}
+      <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-3 text-xs text-yellow-800">
+        נתונים מצטברים עשויים להיות חלקיים — לפי מה שמופיע בתלוש בלבד
+      </div>
     </div>
   );
 }
@@ -679,7 +757,7 @@ export function ResultsPage() {
           {activeTab === "breakdown" && <BreakdownTab result={result} />}
           {activeTab === "anomalies" && <AnomaliesTab result={result} />}
           {activeTab === "credits" && <TaxCreditsTab result={result} />}
-          {activeTab === "ytd" && <YtdTab />}
+          {activeTab === "ytd" && <YtdTab result={result} />}
           {activeTab === "export" && <ExportTab />}
         </div>
       </main>

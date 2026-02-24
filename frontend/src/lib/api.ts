@@ -99,9 +99,33 @@ export interface Anomaly {
 
 export interface SectionBlock {
   section_name: string;
+  section_type: string; // "earnings_table" | "deductions_section" | "contributions_section" |
+                        // "ytd_section" | "balances_section" | "summary_box" | "page"
   bbox_json: Record<string, number> | null;
   page_index: number;
   raw_text_preview: string | null;
+}
+
+// Phase 3: Year-to-date accumulated totals
+export interface YTDMetrics {
+  gross_ytd: number | null;              // מצטבר ברוטו
+  net_ytd: number | null;               // מצטבר נטו
+  income_tax_ytd: number | null;        // מצטבר מס הכנסה
+  national_insurance_ytd: number | null;// מצטבר ביטוח לאומי
+  health_ytd: number | null;            // מצטבר מס בריאות
+  pension_ytd: number | null;           // מצטבר פנסיה
+  training_fund_ytd: number | null;     // מצטבר קרן השתלמות
+  confidence: number;
+}
+
+// Phase 3: Carry-forward balance (vacation days, sick days, training fund ILS, etc.)
+export interface BalanceItem {
+  id: string;
+  name_hebrew: string;
+  balance_value: number | null;
+  unit: string; // "days" | "hours" | "ils" | "unknown"
+  confidence: number;
+  raw_text: string | null;
 }
 
 export interface TaxCreditsDetected {
@@ -126,6 +150,9 @@ export interface ParsedSlipPayload {
   // "pdf_text_layer" | "ocr" | "mock" | "ocr_unavailable"
   ocr_debug_preview: string | null;
   // Local-dev debug only (populated when DEBUG_OCR_PREVIEW=true AND transient=true)
+  // Phase 3: YTD metrics and carry-forward balances
+  ytd: YTDMetrics | null;
+  balances: BalanceItem[];
 }
 
 export interface UploadResponse {

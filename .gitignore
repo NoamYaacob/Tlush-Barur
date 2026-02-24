@@ -49,3 +49,5 @@ Thumbs.db
 # Local data
 backend/.data/
 backend/.env
+
+backend/.data/
