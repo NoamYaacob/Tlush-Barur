@@ -11,15 +11,15 @@ Test inventory (10 tests):
   5.  apply_corrections_to_payload — non-existent line item id raises ValueError
   6.  recompute_anomalies — correcting income_tax from None to 1200 clears income-tax anomaly
   7.  recompute_anomalies — correcting gross upward triggers integrity failure
-  8.  _check_income_tax_rule — gross=2400, no credits → estimated=240 > 100 → Warning
-  9.  _check_income_tax_rule — gross=2400, credit_points=10 → estimated≤0 → Info below-threshold
+  8.  _check_income_tax_rule — gross=5000, no credits → estimated=500 > 20 → Warning
+  9.  _check_income_tax_rule — gross=2000, credit_points=10 → estimated≤0 → Info below-threshold
   10. _check_income_tax_rule — income_tax present → returns None (no anomaly)
 
-Smart tax rule constants (from parser.py):
-    estimated = max(0, gross × 0.10 − credit_points × 242)
-    estimated > 100  → Warning 'ano_missing_income_tax'
-    estimated ≤ 0    → Info   'ano_below_tax_threshold'
-    0 < estimated ≤ 100 → None  (borderline, skip)
+Smart tax rule constants (Phase 7.1, from parser.py):
+    estimated = gross × 0.10 − credit_points × 258 − provident_funds × 0.35
+    estimated > 20   → Warning 'ano_missing_income_tax'
+    estimated ≤ 0    → Info   'ano_below_tax_threshold'  (what_we_found contains "תקין")
+    0 < estimated ≤ 20 → None  (borderline, skip)
 """
 
 from __future__ import annotations
@@ -293,7 +293,7 @@ def test_recompute_updates_integrity_notes():
 
 def test_income_tax_rule_emits_warning_when_above_threshold():
     """
-    gross=5_000, credit_points=None → estimated = 5000×0.10 = 500 > 100
+    gross=5_000, credit_points=None → estimated = 5000×0.10 = 500 > 20
     With income_tax=None → Warning 'ano_missing_income_tax'.
     """
     from app.services.parser import _check_income_tax_rule
@@ -315,7 +315,7 @@ def test_income_tax_rule_emits_warning_when_above_threshold():
 
 def test_income_tax_rule_emits_info_when_below_threshold():
     """
-    gross=2_000, credit_points=10 → estimated = max(0, 200 − 2420) = 0 ≤ 0
+    gross=2_000, credit_points=10 → estimated = 200 − (10 × 258) = −2380 ≤ 0
     With income_tax=None → Info 'ano_below_tax_threshold'.
     """
     from app.services.parser import _check_income_tax_rule

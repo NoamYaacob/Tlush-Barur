@@ -947,9 +947,10 @@ def _run_integrity_checks(
 # ---------------------------------------------------------------------------
 
 # 2024 Israeli tax authority values
-_CREDIT_POINT_TAX_VALUE: float = 242.0    # ₪ monthly tax reduction per credit point
+_CREDIT_POINT_TAX_VALUE: float = 258.0    # ₪ monthly tax reduction per credit point (2024)
 _INCOME_TAX_MARGINAL_RATE: float = 0.10   # bottom bracket rate used for threshold estimate
-_INCOME_TAX_NOISE_FLOOR: float = 100.0    # gaps ≤ ₪100 are not flagged
+_INCOME_TAX_NOISE_FLOOR: float = 20.0     # gaps ≤ ₪20 are not flagged (Phase 7.1: lowered)
+_PENSION_TAX_CREDIT_RATE: float = 0.35    # Section 45a: 35% tax credit on employee pension contributions
 
 # Phase 7: Mathematical rate-verification constants (2024 Israeli law)
 # Employer pension contribution (mandatory minimum per pension regulations)
@@ -971,17 +972,24 @@ def _check_income_tax_rule(
     gross: "float | None",
     income_tax: "float | None",
     credit_points: "float | None",
+    gross_taxable: "float | None" = None,
+    provident_funds_deduction: "float | None" = None,
 ) -> "object | None":
     """
-    Phase 6: Smart income-tax presence check.
+    Phase 7.1: Smart income-tax presence check with Section 45a pension tax credit.
 
-    Estimates expected tax: max(0, gross × 0.10 − credit_points × 242)
+    Formula (Israeli 2024):
+      estimated_tax = (gross_taxable * 0.10)
+                    − (credit_points * 258)
+                    − (provident_funds_deduction * 0.35)   ← Section 45a pension credit
+
+    Uses gross_taxable if available; falls back to gross otherwise.
 
     Returns:
-      - None  if income_tax is detected (no problem)
-      - Info  if estimated tax ≤ 0  (zero tax is EXPECTED — below threshold)
-      - None  if 0 < estimated ≤ ₪100  (borderline — not worth flagging)
-      - Warning if estimated > ₪100 and income_tax is None
+      - None    if income_tax is detected (no problem)
+      - Info    if estimated_tax ≤ 0  (zero tax is EXPECTED — below threshold after pension credit)
+      - None    if 0 < estimated_tax ≤ ₪20  (borderline — not worth flagging)
+      - Warning if estimated_tax > ₪20 and income_tax is None
       - Warning if gross is None and income_tax is None  (can't estimate; flag generically)
     """
     from app.models.schemas import Anomaly, AnomalySeverity
@@ -991,7 +999,8 @@ def _check_income_tax_rule(
         return None
 
     # No gross → can't estimate threshold; emit generic warning
-    if gross is None:
+    gross_base = gross_taxable if gross_taxable is not None else gross
+    if gross_base is None:
         return Anomaly(
             id="ano_missing_income_tax",
             severity=AnomalySeverity.WARNING,
@@ -1006,24 +1015,35 @@ def _check_income_tax_rule(
         )
 
     effective_credits = credit_points or 0.0
-    estimated_tax = max(0.0, gross * _INCOME_TAX_MARGINAL_RATE - effective_credits * _CREDIT_POINT_TAX_VALUE)
+    pension_credit = abs(provident_funds_deduction or 0.0) * _PENSION_TAX_CREDIT_RATE  # Section 45a
+    estimated_tax = (
+        gross_base * _INCOME_TAX_MARGINAL_RATE
+        - effective_credits * _CREDIT_POINT_TAX_VALUE
+        - pension_credit
+    )
 
     if estimated_tax <= 0:
-        # Clearly below threshold — zero income tax is expected
+        # Zero income tax is fully explained — emit a reassuring Info
+        pension_note = (
+            f", וזיכוי סעיף 45א (הפרשה לפנסיה ₪{abs(provident_funds_deduction or 0.0):,.0f} × 35%)"
+            if provident_funds_deduction
+            else ""
+        )
         return Anomaly(
             id="ano_below_tax_threshold",
             severity=AnomalySeverity.INFO,
             what_we_found=(
-                f"שכר הברוטו ({gross:,.0f}₪) נמוך מסף מס ההכנסה — "
-                f"מס ההכנסה אפס הוא תקין"
+                "תקין: לא נוכה מס הכנסה מכיוון שהשכר מתחת לסף המס "
+                "בהתחשב בנקודות הזיכוי וההפרשות לפנסיה."
             ),
             why_suspicious=(
-                f"לפי הנקודות הזיכוי שזוהו ({effective_credits:.2f} × ₪{_CREDIT_POINT_TAX_VALUE:.0f}) "
-                f"והשכר הברוטו, השכר אינו עובר את הסף החייב במס. "
-                "זה תקין לשכרות נמוכות / חלקיות."
+                f"לפי נקודות הזיכוי ({effective_credits:.2f} × ₪{_CREDIT_POINT_TAX_VALUE:.0f})"
+                f"{pension_note}, "
+                f"השכר הברוטו ({gross_base:,.0f}₪) אינו עובר את סף המס. "
+                "מס הכנסה אפס הוא תקין לחלוטין."
             ),
-            what_to_do="אין צורך בפעולה — מס הכנסה אפס הוא תקין עבור שכר זה.",
-            ask_payroll="האם אני אכן פטור ממס הכנסה לפי הנקודות ורמת השכר שלי?",
+            what_to_do="אין צורך בפעולה — מס הכנסה אפס הוא צפוי עבור שכר ונקודות זיכוי אלה.",
+            ask_payroll="האם אני אכן פטור ממס הכנסה לפי הנקודות, הפנסיה ורמת השכר שלי?",
             related_line_item_ids=[],
         )
 
@@ -1034,10 +1054,10 @@ def _check_income_tax_rule(
             severity=AnomalySeverity.WARNING,
             what_we_found=(
                 f"לא זוהה מס הכנסה — צפוי כ-₪{estimated_tax:,.0f} "
-                f"(ברוטו {gross:,.0f}₪, {effective_credits:.2f} נקודות זיכוי)"
+                f"(ברוטו {gross_base:,.0f}₪, {effective_credits:.2f} נקודות זיכוי)"
             ),
             why_suspicious=(
-                f"לפי אמדן ראשוני (ברוטו × 10% פחות זיכויים), "
+                f"לפי אמדן ראשוני (ברוטו × 10% פחות זיכויים וזיכוי פנסיה סעיף 45א), "
                 f"מס ההכנסה הצפוי הוא כ-₪{estimated_tax:,.0f} לחודש. "
                 "אי-הופעת מס הכנסה בתלוש עשויה להצביע על שגיאה בחישוב או בזיהוי."
             ),
@@ -1050,7 +1070,7 @@ def _check_income_tax_rule(
             related_line_item_ids=[],
         )
 
-    # Estimated in (0, ₪100] — borderline, not worth flagging
+    # Estimated in (0, ₪20] — borderline, not worth flagging
     return None
 
 
@@ -1069,14 +1089,16 @@ def _run_extended_checks(
     net_to_pay: float | None,
     line_items: list,
     answers: object | None,
+    gross_taxable: float | None = None,
+    provident_funds_deduction: float | None = None,
 ) -> list:
     """
-    Extended rule-engine checks (Phase 4, updated Phase 6).
+    Extended rule-engine checks (Phase 4, updated Phase 6, Phase 7.1).
     Returns list of Anomaly objects (Warning/Info severity).
     Critical anomalies are still handled by _build_anomalies_from_real_data().
 
     Rules:
-      A  — Income tax: smart threshold check (Phase 6 upgrade)
+      A  — Income tax: smart threshold check w/ Section 45a pension credit (Phase 7.1)
       A2 — Missing national_ins AND health → Warning (regardless of income_tax)
       B  — Credit points too low (<2.0) → Info; too high (>8.0) → Warning
       C  — net_to_pay vs. net_salary gap > ₪50 → Info
@@ -1091,9 +1113,13 @@ def _run_extended_checks(
     anomalies: list = []
 
     # ------------------------------------------------------------------
-    # Rule A: Income tax — smart threshold check (Phase 6)
+    # Rule A: Income tax — smart threshold check with Section 45a (Phase 7.1)
     # ------------------------------------------------------------------
-    income_tax_anomaly = _check_income_tax_rule(gross, income_tax, credit_points)
+    income_tax_anomaly = _check_income_tax_rule(
+        gross, income_tax, credit_points,
+        gross_taxable=gross_taxable,
+        provident_funds_deduction=provident_funds_deduction,
+    )
     if income_tax_anomaly is not None:
         anomalies.append(income_tax_anomaly)
 
@@ -1350,6 +1376,8 @@ def _build_anomalies_from_real_data(
     net_to_pay: float | None = None,
     line_items: list | None = None,
     answers: object | None = None,
+    gross_taxable: float | None = None,
+    provident_funds_deduction: float | None = None,
 ) -> list:
     """
     Build Anomaly objects for integrity failures detected from real extracted values.
@@ -1394,6 +1422,8 @@ def _build_anomalies_from_real_data(
         net_to_pay=net_to_pay,
         line_items=line_items or [],
         answers=answers,
+        gross_taxable=gross_taxable,
+        provident_funds_deduction=provident_funds_deduction,
     ))
 
     return anomalies
@@ -2674,6 +2704,9 @@ def parse_with_ocr(
     # Phase 4: resolve net_salary / net_to_pay scalars for extended anomaly checks
     _net_salary_val  = net_salary_field.value  if net_salary_field  else None
     _net_to_pay_val  = net_to_pay_field.value  if net_to_pay_field  else None
+    # Phase 7.1: pass gross_taxable and provident_funds_deduction for Section 45a pension credit
+    _gross_taxable_val      = gross_taxable_field.value      if gross_taxable_field      else None
+    _provident_funds_val    = provident_funds_field.value    if provident_funds_field     else None
 
     anomalies: list[Anomaly] = _build_anomalies_from_real_data(  # type: ignore[assignment]
         gross, net, integrity_ok, integrity_notes,
@@ -2685,6 +2718,8 @@ def parse_with_ocr(
         net_to_pay=_net_to_pay_val,
         line_items=line_items,
         answers=answers,
+        gross_taxable=_gross_taxable_val,
+        provident_funds_deduction=_provident_funds_val,
     )
 
     extracted_confs = [f.confidence for f in [net_field, gross_field] if f is not None]

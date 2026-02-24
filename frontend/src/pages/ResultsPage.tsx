@@ -359,22 +359,24 @@ function SummaryTab({ result, savingField, onCorrection }: SummaryTabProps) {
           <h3 className="font-bold text-gray-700 mb-3">תיבות סיכום (OCR)</h3>
           <div className="space-y-2 text-sm">
             {[
-              { label: "ברוטו למס הכנסה",       value: summary.gross_taxable,             deduction: false },
-              { label: "ברוטו לביטוח לאומי",    value: summary.gross_ni,                  deduction: false },
-              { label: "סה״כ תשלומים אחרים",    value: summary.total_payments_other,      deduction: false },
-              { label: "ניכויי חובה — מסים",    value: summary.mandatory_taxes_total,     deduction: true  },
-              { label: "ניכוי קופות גמל",        value: summary.provident_funds_deduction, deduction: true  },
-              { label: "ניכויים שונים",           value: summary.other_deductions,          deduction: true  },
-              { label: "שכר נטו",                value: summary.net_salary,                deduction: false },
-              { label: "נטו לתשלום",             value: summary.net_to_pay,                deduction: false },
-              { label: "נקודות זיכוי",           value: summary.credit_points,             deduction: false },
+              { label: "ברוטו למס הכנסה",       value: summary.gross_taxable,             deduction: false, isPoints: false },
+              { label: "ברוטו לביטוח לאומי",    value: summary.gross_ni,                  deduction: false, isPoints: false },
+              { label: "סה״כ תשלומים אחרים",    value: summary.total_payments_other,      deduction: false, isPoints: false },
+              { label: "ניכויי חובה — מסים",    value: summary.mandatory_taxes_total,     deduction: true,  isPoints: false },
+              { label: "ניכוי קופות גמל",        value: summary.provident_funds_deduction, deduction: true,  isPoints: false },
+              { label: "ניכויים שונים",           value: summary.other_deductions,          deduction: true,  isPoints: false },
+              { label: "שכר נטו",                value: summary.net_salary,                deduction: false, isPoints: false },
+              { label: "נטו לתשלום",             value: summary.net_to_pay,                deduction: false, isPoints: false },
+              { label: "נקודות זיכוי",           value: summary.credit_points,             deduction: false, isPoints: true  },
             ]
               .filter((r) => r.value != null)
               .map((r) => (
                 <div key={r.label} className="flex justify-between items-center border-b border-gray-100 pb-1">
                   <span className="text-gray-600">{r.label}</span>
                   <span className="font-medium text-gray-800" dir="ltr">
-                    {r.deduction ? `(${fmt(r.value)})` : fmt(r.value!)}
+                    {r.isPoints
+                      ? r.value!.toLocaleString("he-IL", { maximumFractionDigits: 2 })
+                      : r.deduction ? `(${fmt(r.value)})` : fmt(r.value!)}
                   </span>
                 </div>
               ))}
