@@ -208,7 +208,6 @@ function SummaryTab({ result, savingField, onCorrection }: SummaryTabProps) {
           <div>
             <span className="text-gray-500">ספק: </span>
             <span className="font-medium">{slip_meta.provider_guess}</span>
-            <ConfidenceBadge value={slip_meta.confidence} />
           </div>
           <div>
             <span className="text-gray-500">מעסיק: </span>
@@ -269,7 +268,6 @@ function SummaryTab({ result, savingField, onCorrection }: SummaryTabProps) {
               isCorrected={correctedPaths.has("summary.gross")}
             />
           </div>
-          <ConfidenceBadge value={summary.gross_confidence} />
         </div>
         {/* Net — editable */}
         <div className="rounded-xl border p-4 bg-blue-50 border-blue-200">
@@ -283,19 +281,16 @@ function SummaryTab({ result, savingField, onCorrection }: SummaryTabProps) {
               isCorrected={correctedPaths.has("summary.net")}
             />
           </div>
-          <ConfidenceBadge value={summary.net_confidence} />
         </div>
         {/* Total deductions — read-only computed */}
         <div className="rounded-xl border p-4 bg-orange-50 border-orange-200">
           <p className="text-xs text-gray-500 mb-1">סה״כ ניכויים</p>
           <p className="text-2xl font-bold text-gray-800" dir="ltr">{fmt(summary.total_deductions)}</p>
-          <ConfidenceBadge value={0.9} />
         </div>
         {/* Employer contributions — read-only */}
         <div className="rounded-xl border p-4 bg-purple-50 border-purple-200">
           <p className="text-xs text-gray-500 mb-1">הפרשות מעסיק</p>
           <p className="text-2xl font-bold text-gray-800" dir="ltr">{fmt(summary.total_employer_contributions)}</p>
-          <ConfidenceBadge value={0.9} />
         </div>
       </div>
 
@@ -498,7 +493,6 @@ function BreakdownTab({ result, savingField, onCorrection }: BreakdownTabProps) 
                             לא מזוהה
                           </span>
                         )}
-                        <ConfidenceBadge value={li.confidence} />
                       </div>
                       <span className="text-gray-400 text-xs flex-shrink-0">{expanded.has(li.id) ? "▲" : "▼"}</span>
                     </button>

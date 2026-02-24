@@ -951,6 +951,21 @@ _CREDIT_POINT_TAX_VALUE: float = 242.0    # ₪ monthly tax reduction per credit
 _INCOME_TAX_MARGINAL_RATE: float = 0.10   # bottom bracket rate used for threshold estimate
 _INCOME_TAX_NOISE_FLOOR: float = 100.0    # gaps ≤ ₪100 are not flagged
 
+# Phase 7: Mathematical rate-verification constants (2024 Israeli law)
+# Employer pension contribution (mandatory minimum per pension regulations)
+_PENSION_EMPLOYER_RATE_MIN: float = 0.065   # 6.5%
+_PENSION_EMPLOYER_RATE_MAX: float = 0.085   # 8.5%
+
+# National Insurance (ביטוח לאומי) employee rate — simplified bracket
+# Rate ≈ 3.5% below NI threshold (~₪7,522/mo), 12% above.
+# Rule-engine bound: 2% (low-income) to 15% (incl. edge cases)
+_NI_RATE_MIN: float = 0.02    # 2%
+_NI_RATE_MAX: float = 0.15    # 15%
+
+# Health Tax (מס בריאות) — flat 3.1% below threshold, ~5% above
+_HEALTH_RATE_MIN: float = 0.015   # 1.5% (low-income edge)
+_HEALTH_RATE_MAX: float = 0.065   # 6.5% (upper, with variation)
+
 
 def _check_income_tax_rule(
     gross: "float | None",
@@ -1067,6 +1082,9 @@ def _run_extended_checks(
       C  — net_to_pay vs. net_salary gap > ₪50 → Info
       D  — Pension (employee) rate out of range → Warning
       E  — No gross found → Info (cannot validate math)
+      F  — Employer pension contribution rate out of expected range [6.5%–8.5%] → Warning
+      G  — National Insurance rate out of expected range [2%–15%] → Warning
+      H  — Health tax rate out of expected range [1.5%–6.5%] → Warning
     """
     from app.models.schemas import Anomaly, AnomalySeverity, LineItemCategory
 
@@ -1201,6 +1219,99 @@ def _run_extended_checks(
                     ask_payroll="מהו שיעור ניכוי הפנסיה שלי ולאיזו קרן הוא מועבר?",
                     related_line_item_ids=[getattr(pension_item, "id", "")],
                 ))
+
+    # ------------------------------------------------------------------
+    # Rule F: Employer pension contribution rate out of expected range → Warning
+    # (Searches line_items for employer_contribution category with pension keywords)
+    # ------------------------------------------------------------------
+    if gross is not None and gross > 0 and line_items:
+        employer_pension_item = next(
+            (li for li in line_items
+             if getattr(li, "category", None) is not None
+             and str(getattr(li, "category", "")) in (
+                 "employer_contribution", "LineItemCategory.EMPLOYER_CONTRIBUTION"
+             )
+             and li.value is not None
+             and any(kw in getattr(li, "description_hebrew", "")
+                     for kw in ("פנסיה", "תגמולים", "קרן פנסיה", "קופת גמל"))),
+            None,
+        )
+        if employer_pension_item is not None and employer_pension_item.value is not None:
+            ep_abs = abs(employer_pension_item.value)
+            ep_rate = ep_abs / gross
+            if ep_rate < _PENSION_EMPLOYER_RATE_MIN or ep_rate > _PENSION_EMPLOYER_RATE_MAX:
+                anomalies.append(Anomaly(
+                    id="ano_employer_pension_rate_unusual",
+                    severity=AnomalySeverity.WARNING,
+                    what_we_found=(
+                        f"הפרשת מעסיק לפנסיה: {ep_rate:.1%} מהשכר "
+                        f"({ep_abs:,.0f}₪ מתוך {gross:,.0f}₪) — צפוי 6.5%–8.5%"
+                    ),
+                    why_suspicious=(
+                        "לפי תקנות פנסיה חובה בישראל, המעסיק מחויב להפריש לפחות 6.5% מהשכר. "
+                        f"השיעור שנמצא ({ep_rate:.1%}) חורג מהטווח המצופה (6.5%–8.5%). "
+                        "שיעור חריג עשוי להצביע על שגיאה בזיהוי או על הסכם מיוחד."
+                    ),
+                    what_to_do=(
+                        "בדוק עם מחלקת שכר את שיעור הפרשת המעסיק לפנסיה. "
+                        "וודא שהסכום מועבר לקרן הפנסיה שלך בפועל."
+                    ),
+                    ask_payroll="מה שיעור הפרשת המעסיק לפנסיה החודש?",
+                    related_line_item_ids=[getattr(employer_pension_item, "id", "")],
+                ))
+
+    # ------------------------------------------------------------------
+    # Rule G: National Insurance rate sanity check → Warning
+    # Uses summary.national_insurance / gross (or gross_ni as proxy if available)
+    # ------------------------------------------------------------------
+    if gross is not None and gross > 0 and national_ins is not None and national_ins > 0:
+        # Use gross directly (gross_ni not passed here; gross is already fallback-resolved)
+        ni_rate = national_ins / gross
+        if ni_rate < _NI_RATE_MIN or ni_rate > _NI_RATE_MAX:
+            anomalies.append(Anomaly(
+                id="ano_national_insurance_rate_unusual",
+                severity=AnomalySeverity.WARNING,
+                what_we_found=(
+                    f"ביטוח לאומי: {ni_rate:.1%} מהשכר "
+                    f"({national_ins:,.0f}₪ מתוך {gross:,.0f}₪) — צפוי 3.5%–12%"
+                ),
+                why_suspicious=(
+                    "שיעור ביטוח לאומי החורג מהטווח הצפוי (2%–15%) עשוי להצביע על שגיאת זיהוי. "
+                    "השיעור המקובל הוא כ-3.5% על הכנסה מתחת לתקרה ו-12% מעליה."
+                ),
+                what_to_do=(
+                    "השווה את סכום ביטוח הלאומי בתלוש הפיזי. "
+                    "אם הסכום שגוי, ניתן לתקן אותו ידנית בממשק התיקונים."
+                ),
+                ask_payroll="האם ניכוי ביטוח הלאומי תואם את הרשום בתלוש?",
+                related_line_item_ids=[],
+            ))
+
+    # ------------------------------------------------------------------
+    # Rule H: Health tax rate sanity check → Warning
+    # Uses summary.health_insurance / gross
+    # ------------------------------------------------------------------
+    if gross is not None and gross > 0 and health is not None and health > 0:
+        health_rate = health / gross
+        if health_rate < _HEALTH_RATE_MIN or health_rate > _HEALTH_RATE_MAX:
+            anomalies.append(Anomaly(
+                id="ano_health_tax_rate_unusual",
+                severity=AnomalySeverity.WARNING,
+                what_we_found=(
+                    f"מס בריאות: {health_rate:.1%} מהשכר "
+                    f"({health:,.0f}₪ מתוך {gross:,.0f}₪) — צפוי 1.5%–6.5%"
+                ),
+                why_suspicious=(
+                    "שיעור מס בריאות החורג מהטווח הצפוי (1.5%–6.5%) עשוי להצביע על שגיאת זיהוי. "
+                    "השיעור הסטנדרטי הוא 3.1% מתחת לתקרה ו-5% מעליה."
+                ),
+                what_to_do=(
+                    "השווה את סכום מס הבריאות בתלוש הפיזי. "
+                    "אם הסכום שגוי, ניתן לתקן אותו ידנית בממשק התיקונים."
+                ),
+                ask_payroll="האם ניכוי מס הבריאות תואם את הרשום בתלוש?",
+                related_line_item_ids=[],
+            ))
 
     # ------------------------------------------------------------------
     # Rule E: No gross found → Info (cannot validate math)
@@ -2197,6 +2308,79 @@ def _build_ocr_debug_preview(pages_text: dict[int, str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Phase 7: Gross/net fallback helper (pure, testable)
+# ---------------------------------------------------------------------------
+
+def _apply_gross_net_fallback(
+    gross: "float | None",
+    net: "float | None",
+    gross_field_confidence: "float | None",
+    net_field_confidence: "float | None",
+    gross_taxable_value: "float | None",
+    gross_taxable_confidence: "float | None",
+    gross_ni_value: "float | None",
+    gross_ni_confidence: "float | None",
+    net_to_pay_value: "float | None",
+    net_to_pay_confidence: "float | None",
+    net_salary_value: "float | None",
+    net_salary_confidence: "float | None",
+) -> "tuple[float | None, float, str | None, float | None, float, str | None]":
+    """
+    Phase 7: Apply smart fallback when main gross/net extraction failed.
+
+    Priority order:
+      gross: gross_taxable → gross_ni  (confidence × 0.85 penalty)
+      net:   net_to_pay   → net_salary (confidence × 0.85 penalty)
+
+    Returns:
+      (resolved_gross, gross_confidence, gross_fallback_note,
+       resolved_net,   net_confidence,   net_fallback_note)
+    """
+    # --- Gross ---
+    if gross is None:
+        if gross_taxable_value is not None and gross_taxable_confidence is not None:
+            resolved_gross: float | None = gross_taxable_value
+            gross_confidence = round(gross_taxable_confidence * 0.85, 3)
+            gross_fallback_note: str | None = "ברוטו חושב מ-ברוטו למס הכנסה"
+        elif gross_ni_value is not None and gross_ni_confidence is not None:
+            resolved_gross = gross_ni_value
+            gross_confidence = round(gross_ni_confidence * 0.85, 3)
+            gross_fallback_note = "ברוטו חושב מ-ברוטו לביטוח לאומי"
+        else:
+            resolved_gross = None
+            gross_confidence = 0.0
+            gross_fallback_note = None
+    else:
+        resolved_gross = gross
+        gross_confidence = gross_field_confidence if gross_field_confidence is not None else 0.0
+        gross_fallback_note = None
+
+    # --- Net ---
+    if net is None:
+        if net_to_pay_value is not None and net_to_pay_confidence is not None:
+            resolved_net: float | None = net_to_pay_value
+            net_confidence = round(net_to_pay_confidence * 0.85, 3)
+            net_fallback_note: str | None = "נטו חושב מ-נטו לתשלום"
+        elif net_salary_value is not None and net_salary_confidence is not None:
+            resolved_net = net_salary_value
+            net_confidence = round(net_salary_confidence * 0.85, 3)
+            net_fallback_note = "נטו חושב מ-שכר נטו"
+        else:
+            resolved_net = None
+            net_confidence = 0.0
+            net_fallback_note = None
+    else:
+        resolved_net = net
+        net_confidence = net_field_confidence if net_field_confidence is not None else 0.0
+        net_fallback_note = None
+
+    return (
+        resolved_gross, gross_confidence, gross_fallback_note,
+        resolved_net,   net_confidence,   net_fallback_note,
+    )
+
+
+# ---------------------------------------------------------------------------
 # OCR entry point
 # ---------------------------------------------------------------------------
 
@@ -2326,6 +2510,26 @@ def parse_with_ocr(
     # Resolve scalar values
     net = net_field.value if net_field else None
     gross = gross_field.value if gross_field else None
+
+    # Phase 7: Smart fallback via pure helper — if main patterns failed, use summary-box equivalents.
+    (
+        gross, gross_confidence, _gross_fallback_note,
+        net,   net_confidence,   _net_fallback_note,
+    ) = _apply_gross_net_fallback(
+        gross=gross,
+        net=net,
+        gross_field_confidence=gross_field.confidence if gross_field else None,
+        net_field_confidence=net_field.confidence if net_field else None,
+        gross_taxable_value=gross_taxable_field.value if gross_taxable_field else None,
+        gross_taxable_confidence=gross_taxable_field.confidence if gross_taxable_field else None,
+        gross_ni_value=gross_ni_field.value if gross_ni_field else None,
+        gross_ni_confidence=gross_ni_field.confidence if gross_ni_field else None,
+        net_to_pay_value=net_to_pay_field.value if net_to_pay_field else None,
+        net_to_pay_confidence=net_to_pay_field.confidence if net_to_pay_field else None,
+        net_salary_value=net_salary_field.value if net_salary_field else None,
+        net_salary_confidence=net_salary_field.confidence if net_salary_field else None,
+    )
+
     income_tax = income_tax_field.value if income_tax_field else None
     national_ins = national_ins_field.value if national_ins_field else None
     health = health_field.value if health_field else None
@@ -2341,6 +2545,11 @@ def parse_with_ocr(
     # Append any notes from net_to_pay computed fallback
     if _ntp_extra_notes:
         integrity_notes = integrity_notes + _ntp_extra_notes
+    # Phase 7: Append transparency note when gross/net were filled from fallback fields
+    if _gross_fallback_note:
+        integrity_notes = integrity_notes + [_gross_fallback_note]
+    if _net_fallback_note:
+        integrity_notes = integrity_notes + [_net_fallback_note]
 
     # Build line items — Phase 2D.2: real table extraction + summary-box supplements
     # Step 1: extract real table rows from OCR text (Phase 3: pass provider adapter)
@@ -2508,9 +2717,9 @@ def parse_with_ocr(
         ),
         summary=SummaryTotals(
             gross=gross,
-            gross_confidence=gross_field.confidence if gross_field else 0.0,
+            gross_confidence=gross_confidence,
             net=net,
-            net_confidence=net_field.confidence if net_field else 0.0,
+            net_confidence=net_confidence,
             total_deductions=total_deductions,
             total_employer_contributions=None,
             income_tax=income_tax,
