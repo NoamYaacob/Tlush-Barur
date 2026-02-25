@@ -19,6 +19,7 @@ import {
   type CreditWizardResult,
   submitCreditWizard,
   applyCorrections,
+  exportPdf,
 } from "../lib/api";
 import { useUploadStatus } from "../hooks/useUploadStatus";
 import { ProgressBar } from "../components/ProgressBar";
@@ -1135,11 +1136,64 @@ function YtdTab({ result }: { result: ParsedSlipPayload }) {
   );
 }
 
-function ExportTab() {
+function ExportTab({ uploadId }: { uploadId: string }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleDownload = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const blob = await exportPdf(uploadId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "tlush_barur.pdf";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "שגיאה בייצוא הדוח");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <div className="text-center py-14 text-gray-400">
-      <div className="text-4xl mb-3">📥</div>
-      <p>ייצוא PDF ו-Excel יהיה זמין בשלב הבא.</p>
+    <div
+      className="bg-white rounded-xl border border-gray-200 p-8 text-center"
+      dir="rtl"
+    >
+      <div className="text-5xl mb-4">📄</div>
+      <h3 className="text-lg font-bold text-gray-800 mb-2">ייצוא דוח PDF</h3>
+      <p className="text-sm text-gray-500 mb-6">
+        הורד דוח מקצועי בעברית הכולל סיכום פיננסי, פירוט שורות שכר, תובנות
+        חכמות וחריגות.
+      </p>
+      <button
+        onClick={handleDownload}
+        disabled={loading}
+        className="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700
+                   disabled:bg-blue-300 text-white font-semibold py-2.5 px-6
+                   rounded-lg transition-colors"
+      >
+        {loading ? (
+          <>
+            <span
+              className="animate-spin inline-block w-4 h-4 border-2 border-white
+                         border-t-transparent rounded-full"
+            />
+            מייצא...
+          </>
+        ) : (
+          <>📥 ייצוא לדוח PDF</>
+        )}
+      </button>
+      {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
+      <p className="mt-6 text-xs text-gray-400">
+        הדוח אינו כולל שמות עובד/ת או מעסיק — מופק למטרות חינוכיות בלבד.
+      </p>
     </div>
   );
 }
@@ -1431,7 +1485,7 @@ export function ResultsPage() {
           {activeTab === "anomalies" && <AnomaliesTab result={result} />}
           {activeTab === "credits" && <TaxCreditsTab result={result} uploadId={uploadId ?? ""} />}
           {activeTab === "ytd" && <YtdTab result={result} />}
-          {activeTab === "export" && <ExportTab />}
+          {activeTab === "export" && <ExportTab uploadId={uploadId!} />}
         </div>
       </main>
 

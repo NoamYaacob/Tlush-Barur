@@ -328,3 +328,25 @@ export async function applyCorrections(
     }),
   });
 }
+
+/**
+ * GET /api/uploads/:uploadId/pdf
+ * Phase 17: Download the professional Hebrew PDF report.
+ *
+ * Returns a Blob (PDF binary) which the caller triggers as a browser download.
+ * Uses a plain fetch (not apiFetch) because we need res.blob(), not res.json().
+ */
+export async function exportPdf(uploadId: string): Promise<Blob> {
+  const res = await fetch(`/api/uploads/${uploadId}/pdf`);
+  if (!res.ok) {
+    let detail = `שגיאת שרת ${res.status}`;
+    try {
+      const body = await res.json();
+      detail = body?.detail?.error ?? body?.detail ?? body?.error ?? detail;
+    } catch {
+      // ignore parse failure
+    }
+    throw new Error(detail);
+  }
+  return res.blob();
+}

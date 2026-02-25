@@ -111,15 +111,18 @@ FIELD_PATTERNS: dict[str, list[tuple[str, float]]] = {
         (r'סכום\s+ב?בנק[:\s]*₪?\s*([\d,]+\.?\d*)',     CONFIDENCE_EXACT),    # סכום בבנק / סכום בנק
     ],
     "gross_pay": [
-        (r'ברוטו\s+לצורך\s+מס[:\s]*₪?\s*([\d,]+\.?\d*)', CONFIDENCE_EXACT),
-        (r'ברוטו\s+למס\s+הכנסה[:\s]*₪?\s*([\d,]+\.?\d*)', CONFIDENCE_EXACT),  # Phase 8.1: Hilan layout
-        (r'סה["\u05d4]\u05db\s+ברוטו[:\s]*₪?\s*([\d,]+\.?\d*)',  CONFIDENCE_EXACT),
-        (r'ברוטו[:\s]+₪?\s*([\d,]+\.?\d*)',               CONFIDENCE_AMBIGUOUS),
-        (r'ברוטו\s+([\d,]+\.?\d*)',                        CONFIDENCE_AMBIGUOUS),
-        # Phase 11: additional synonyms
-        (r'סה["\u05d4]\u05db\s+תשלומים[:\s]*₪?\s*([\d,]+\.?\d*)', CONFIDENCE_EXACT),   # סה"כ תשלומים
+        # Phase 16.3 FIX: סה"כ תשלומים MUST be tried FIRST — it is the true employee gross.
+        # "ברוטו למס הכנסה" / "ברוטו לצורך מס" are gross-for-tax bases, not actual pay.
+        # On Hilan slips both values coexist; the lower "סה"כ תשלומים" is correct.
+        (r'סה["\u05d4]\u05db\s+תשלומים[:\s]*₪?\s*([\d,]+\.?\d*)', CONFIDENCE_EXACT),   # סה"כ תשלומים — HIGHEST PRIORITY
         (r'סך\s+(?:כל\s+)?התשלומים[:\s]*₪?\s*([\d,]+\.?\d*)',      CONFIDENCE_EXACT),   # סך כל התשלומים
         (r'סך\s+הכל\s+שכר[:\s]*₪?\s*([\d,]+\.?\d*)',               CONFIDENCE_EXACT),   # סך הכל שכר
+        (r'סה["\u05d4]\u05db\s+ברוטו[:\s]*₪?\s*([\d,]+\.?\d*)',    CONFIDENCE_EXACT),   # סה"כ ברוטו
+        # ברוטו למס patterns — only reached if none of the above matched
+        (r'ברוטו\s+לצורך\s+מס[:\s]*₪?\s*([\d,]+\.?\d*)', CONFIDENCE_EXACT),
+        (r'ברוטו\s+למס\s+הכנסה[:\s]*₪?\s*([\d,]+\.?\d*)', CONFIDENCE_EXACT),  # Hilan layout
+        (r'ברוטו[:\s]+₪?\s*([\d,]+\.?\d*)',               CONFIDENCE_AMBIGUOUS),
+        (r'ברוטו\s+([\d,]+\.?\d*)',                        CONFIDENCE_AMBIGUOUS),
     ],
     "income_tax": [
         (r'מס\s+הכנסה[:\s]*₪?\s*([\d,]+\.?\d*)',       CONFIDENCE_EXACT),
@@ -175,14 +178,18 @@ _FIELD_PATTERNS_OCR_EXTRA: dict[str, list[tuple[str, float]]] = {
         (r'סכום\s*ב?בנק\s*[:\-]?\s*([0-9][0-9,\.]+)',        _CONF_OCR_EXACT),    # סכום בבנק / סכום בנק
     ],
     "gross_pay": [
-        # "ברוטו למס הכנסה" or "ברוטו למס" (no strict punctuation)
+        # Phase 16.3 FIX: סה"כ תשלומים MUST be tried FIRST.
+        # On Hilan payslips "ברוטו למס הכנסה" (29,885) appears in the same document as
+        # "סה"כ תשלומים" (25,089). The former is gross-for-tax, NOT actual employee pay.
+        # Because extract_field() uses first-matching-tier-wins logic, the correct field
+        # must appear before the ברוטו למס patterns in this list.
+        (r'סה["\u05d4]?כ\s*תשלומ\S{0,3}\s*[:\-]?\s*([0-9][0-9,\.]+)',  _CONF_OCR_EXACT),   # סה"כ תשלומים — HIGHEST PRIORITY
+        (r'סך\s*כל\s*התשלומ\S{0,3}\s*[:\-]?\s*([0-9][0-9,\.]+)',        _CONF_OCR_EXACT),   # סך כל התשלומים
+        (r'סך\s*הכל\s*שכר\s*[:\-]?\s*([0-9][0-9,\.]+)',                 _CONF_OCR_EXACT),   # סך הכל שכר
+        # ברוטו למס patterns — only reached if none of the above matched
         (r'ברוטו\s+למס\s*הכנסה?\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
         # "ברוטו לצורך" with garbled מס
         (r'ברוטו\s+לצורך\s*\S{0,4}\s*([0-9][0-9,\.]+)',        _CONF_OCR_AMBIGUOUS),
-        # Phase 11: additional synonyms (OCR-tolerant)
-        (r'סה["\u05d4]?כ\s*תשלומ\S{0,3}\s*[:\-]?\s*([0-9][0-9,\.]+)',  _CONF_OCR_EXACT),   # סה"כ תשלומים
-        (r'סך\s*כל\s*התשלומ\S{0,3}\s*[:\-]?\s*([0-9][0-9,\.]+)',        _CONF_OCR_EXACT),   # סך כל התשלומים
-        (r'סך\s*הכל\s*שכר\s*[:\-]?\s*([0-9][0-9,\.]+)',                 _CONF_OCR_EXACT),   # סך הכל שכר
     ],
     "income_tax": [
         # "מס הכנסה" with last letter garbled ("מס הכנסו", "מס הכנסת", etc.)

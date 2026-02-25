@@ -1,5 +1,9 @@
 """
-test_phase14.py — Tests for Phase 14: LLM Intelligence Layer (Gemini OCR Path).
+test_phase14.py — Tests for Phase 14/16.6: LLM Intelligence Layer (Groq OCR Path).
+
+Phase 16.6: Migrated from Google Gemini to Groq (llama-3.3-70b-versatile).
+Mock pattern: patch 'groq.Groq' so client.chat.completions.create() returns
+a mock whose choices[0].message.content holds the JSON string.
 
 Test list:
   1.  test_llm_extract_raises_when_no_api_key
@@ -54,37 +58,40 @@ def _make_valid_llm_response(
     })
 
 
-def _mock_genai(response_text: str):
+def _mock_groq(response_text: str):
     """
-    Returns a mock for google.generativeai that makes generate_content()
-    return a response with the given text.
+    Returns a mock for groq.Groq whose chat.completions.create() returns a
+    ChatCompletion-like object with choices[0].message.content == response_text.
     """
-    mock_response = MagicMock()
-    mock_response.text = response_text
+    mock_message = MagicMock()
+    mock_message.content = response_text
 
-    mock_model = MagicMock()
-    mock_model.generate_content.return_value = mock_response
+    mock_choice = MagicMock()
+    mock_choice.message = mock_message
 
-    mock_genai = MagicMock()
-    mock_genai.GenerativeModel.return_value = mock_model
+    mock_completion = MagicMock()
+    mock_completion.choices = [mock_choice]
 
-    return mock_genai
+    mock_client = MagicMock()
+    mock_client.chat.completions.create.return_value = mock_completion
+
+    mock_groq_cls = MagicMock(return_value=mock_client)
+    return mock_groq_cls
 
 
 # ---------------------------------------------------------------------------
-# 1. Raises RuntimeError when GEMINI_API_KEY is not set
+# 1. Raises RuntimeError when GROQ_API_KEY is not set
 # ---------------------------------------------------------------------------
 
 def test_llm_extract_raises_when_no_api_key():
     """
-    llm_extract() must raise RuntimeError when GEMINI_API_KEY is absent,
+    llm_extract() must raise RuntimeError when GROQ_API_KEY is absent,
     so the caller can silently fall back to the regex pipeline.
     """
     with patch.dict(os.environ, {}, clear=True):
-        # Ensure any module-level cached key is also absent
-        with patch("app.services.llm_parser._GEMINI_API_KEY", None):
+        with patch("app.services.llm_parser._GROQ_API_KEY", None):
             from app.services.llm_parser import llm_extract
-            with pytest.raises(RuntimeError, match="GEMINI_API_KEY"):
+            with pytest.raises(RuntimeError, match="GROQ_API_KEY"):
                 llm_extract("ברוטו 6000 נטו 5000")
 
 
@@ -94,16 +101,16 @@ def test_llm_extract_raises_when_no_api_key():
 
 def test_llm_extract_returns_payload_on_success():
     """
-    With a mocked Gemini response, llm_extract() must return a ParsedSlipPayload.
+    With a mocked Groq response, llm_extract() must return a ParsedSlipPayload.
     """
     from app.models.schemas import ParsedSlipPayload
     from app.services.llm_parser import llm_extract
 
-    mock_genai = _mock_genai(_make_valid_llm_response())
+    mock_groq_cls = _mock_groq(_make_valid_llm_response())
 
-    with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
-        with patch("app.services.llm_parser._GEMINI_API_KEY", "test-key"):
-            with patch.dict("sys.modules", {"google.generativeai": mock_genai}):
+    with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}):
+        with patch("app.services.llm_parser._GROQ_API_KEY", "test-key"):
+            with patch.dict("sys.modules", {"groq": MagicMock(Groq=mock_groq_cls)}):
                 result = llm_extract("ברוטו 6223 נטו 5354")
 
     assert isinstance(result, ParsedSlipPayload), (
@@ -123,7 +130,7 @@ def test_llm_extract_gross_prefers_total_payments_other():
     from app.services.llm_parser import llm_extract
 
     response = json.dumps({
-        "gross_pay": 6463.00,           # tax-gross (should NOT win)
+        "gross_pay": 6463.00,            # tax-gross (should NOT win)
         "total_payments_other": 6223.70, # actual pay (SHOULD win)
         "net_pay": 5354.20,
         "income_tax": 420.00,
@@ -134,11 +141,11 @@ def test_llm_extract_gross_prefers_total_payments_other():
             {"description_hebrew": "שכר בסיס", "category": "earning", "value": 6223.70},
         ],
     })
-    mock_genai = _mock_genai(response)
+    mock_groq_cls = _mock_groq(response)
 
-    with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
-        with patch("app.services.llm_parser._GEMINI_API_KEY", "test-key"):
-            with patch.dict("sys.modules", {"google.generativeai": mock_genai}):
+    with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}):
+        with patch("app.services.llm_parser._GROQ_API_KEY", "test-key"):
+            with patch.dict("sys.modules", {"groq": MagicMock(Groq=mock_groq_cls)}):
                 result = llm_extract("ברוטו 6223 נטו 5354")
 
     assert result.summary.gross == 6223.70, (
@@ -157,13 +164,12 @@ def test_llm_extract_privacy_provider_is_generic():
     """
     from app.services.llm_parser import llm_extract
 
-    # Include provider name in OCR text — LLM should NOT echo it back
-    ocr_with_provider = "חברת הר-גל בע\"מ\nברוטו 6000 נטו 5000"
-    mock_genai = _mock_genai(_make_valid_llm_response())
+    ocr_with_provider = 'חברת הר-גל בע"מ\nברוטו 6000 נטו 5000'
+    mock_groq_cls = _mock_groq(_make_valid_llm_response())
 
-    with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
-        with patch("app.services.llm_parser._GEMINI_API_KEY", "test-key"):
-            with patch.dict("sys.modules", {"google.generativeai": mock_genai}):
+    with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}):
+        with patch("app.services.llm_parser._GROQ_API_KEY", "test-key"):
+            with patch.dict("sys.modules", {"groq": MagicMock(Groq=mock_groq_cls)}):
                 result = llm_extract(ocr_with_provider)
 
     assert result.slip_meta.provider_guess == "ספק שכר", (
@@ -189,7 +195,6 @@ def test_llm_extract_deduction_values_positive():
     from app.services.llm_parser import llm_extract
     from app.models.schemas import LineItemCategory
 
-    # Simulate LLM returning negative deduction values (instruction violation)
     response = json.dumps({
         "gross_pay": 6000.00,
         "net_pay": 5000.00,
@@ -200,11 +205,11 @@ def test_llm_extract_deduction_values_positive():
             {"description_hebrew": "שכר בסיס", "category": "earning", "value": 6000.00},
         ],
     })
-    mock_genai = _mock_genai(response)
+    mock_groq_cls = _mock_groq(response)
 
-    with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
-        with patch("app.services.llm_parser._GEMINI_API_KEY", "test-key"):
-            with patch.dict("sys.modules", {"google.generativeai": mock_genai}):
+    with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}):
+        with patch("app.services.llm_parser._GROQ_API_KEY", "test-key"):
+            with patch.dict("sys.modules", {"groq": MagicMock(Groq=mock_groq_cls)}):
                 result = llm_extract("ברוטו 6000 נטו 5000")
 
     deduction_items = [
@@ -224,17 +229,17 @@ def test_llm_extract_deduction_values_positive():
 
 def test_llm_extract_raises_on_invalid_json():
     """
-    When Gemini returns non-JSON text (e.g. a plain explanation), llm_extract()
-    must raise json.JSONDecodeError so the caller falls back to regex.
+    When Groq returns non-JSON text, llm_extract() must raise json.JSONDecodeError
+    so the caller falls back to regex.
     """
     import json as json_module
     from app.services.llm_parser import llm_extract
 
-    mock_genai = _mock_genai("Sorry, I cannot extract data from this text.")
+    mock_groq_cls = _mock_groq("Sorry, I cannot extract data from this text.")
 
-    with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
-        with patch("app.services.llm_parser._GEMINI_API_KEY", "test-key"):
-            with patch.dict("sys.modules", {"google.generativeai": mock_genai}):
+    with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}):
+        with patch("app.services.llm_parser._GROQ_API_KEY", "test-key"):
+            with patch.dict("sys.modules", {"groq": MagicMock(Groq=mock_groq_cls)}):
                 with pytest.raises(json_module.JSONDecodeError):
                     llm_extract("ברוטו 6000 נטו 5000")
 
@@ -246,42 +251,52 @@ def test_llm_extract_raises_on_invalid_json():
 def test_llm_extract_truncates_to_12000_chars():
     """
     llm_extract() must truncate the OCR text to _MAX_INPUT_CHARS (12,000)
-    before building the prompt, to control API cost and latency.
+    before building the messages, to control API cost and latency.
     """
     from app.services.llm_parser import llm_extract, _MAX_INPUT_CHARS
 
-    captured_prompts: list[str] = []
-    mock_response = MagicMock()
-    mock_response.text = _make_valid_llm_response()
+    captured_messages: list = []
 
-    mock_model = MagicMock()
-    def capture_prompt(prompt, **kwargs):
-        captured_prompts.append(prompt)
-        return mock_response
-    mock_model.generate_content.side_effect = capture_prompt
+    mock_message = MagicMock()
+    mock_message.content = _make_valid_llm_response()
+    mock_choice = MagicMock()
+    mock_choice.message = mock_message
+    mock_completion = MagicMock()
+    mock_completion.choices = [mock_choice]
 
-    mock_genai = MagicMock()
-    mock_genai.GenerativeModel.return_value = mock_model
+    mock_client = MagicMock()
+    def capture_call(**kwargs):
+        captured_messages.extend(kwargs.get("messages", []))
+        return mock_completion
+    mock_client.chat.completions.create.side_effect = capture_call
+
+    mock_groq_cls = MagicMock(return_value=mock_client)
 
     # Build input text that exceeds the limit
     long_text = "שכר " * 5000   # ~20,000 chars
 
-    with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
-        with patch("app.services.llm_parser._GEMINI_API_KEY", "test-key"):
-            with patch.dict("sys.modules", {"google.generativeai": mock_genai}):
+    with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}):
+        with patch("app.services.llm_parser._GROQ_API_KEY", "test-key"):
+            with patch.dict("sys.modules", {"groq": MagicMock(Groq=mock_groq_cls)}):
                 llm_extract(long_text)
 
-    assert captured_prompts, "generate_content() was never called"
-    prompt_used = captured_prompts[0]
+    assert captured_messages, "chat.completions.create() was never called"
 
-    # The OCR TEXT block in the prompt must not exceed _MAX_INPUT_CHARS
-    # (the system instruction adds overhead, so we check the OCR section only)
-    ocr_start = prompt_used.find("---OCR TEXT START---")
-    ocr_end = prompt_used.find("---OCR TEXT END---")
-    assert ocr_start != -1 and ocr_end != -1, "OCR section markers not found in prompt"
-    ocr_section = prompt_used[ocr_start:ocr_end]
+    # The user message content must contain the OCR block, truncated
+    user_msgs = [m for m in captured_messages if m.get("role") == "user"]
+    assert user_msgs, "No user message found in captured call"
+    user_content = user_msgs[0]["content"]
+
+    # Confirm OCR section markers are present
+    assert "---OCR TEXT START---" in user_content, "OCR start marker not found in user message"
+    assert "---OCR TEXT END---" in user_content, "OCR end marker not found in user message"
+
+    # The OCR section must be within truncation limit
+    ocr_start = user_content.find("---OCR TEXT START---")
+    ocr_end = user_content.find("---OCR TEXT END---")
+    ocr_section = user_content[ocr_start:ocr_end]
     assert len(ocr_section) <= _MAX_INPUT_CHARS + 100, (  # +100 for markers
-        f"OCR section in prompt exceeds {_MAX_INPUT_CHARS} chars: {len(ocr_section)}"
+        f"OCR section in message exceeds {_MAX_INPUT_CHARS} chars: {len(ocr_section)}"
     )
 
 
@@ -332,11 +347,11 @@ def test_parse_source_is_ocr_llm():
     """
     from app.services.llm_parser import llm_extract
 
-    mock_genai = _mock_genai(_make_valid_llm_response())
+    mock_groq_cls = _mock_groq(_make_valid_llm_response())
 
-    with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
-        with patch("app.services.llm_parser._GEMINI_API_KEY", "test-key"):
-            with patch.dict("sys.modules", {"google.generativeai": mock_genai}):
+    with patch.dict(os.environ, {"GROQ_API_KEY": "test-key"}):
+        with patch("app.services.llm_parser._GROQ_API_KEY", "test-key"):
+            with patch.dict("sys.modules", {"groq": MagicMock(Groq=mock_groq_cls)}):
                 result = llm_extract("ברוטו 6223 נטו 5354")
 
     assert result.parse_source == "ocr_llm", (

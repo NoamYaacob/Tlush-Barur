@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -22,9 +25,17 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from app.db.database import DATABASE_URL, init_db
-from app.routers import uploads
-from app.services.cleanup import run_cleanup_loop
+# ---------------------------------------------------------------------------
+# Load .env FIRST — before any other app imports that read os.environ.
+# This ensures GEMINI_API_KEY (and other secrets) are available at module
+# import time for all services, including llm_parser._GEMINI_API_KEY.
+# ---------------------------------------------------------------------------
+_ENV_FILE = Path(__file__).parent.parent / ".env"
+load_dotenv(_ENV_FILE, override=False)  # override=False: real env vars take priority
+
+from app.db.database import DATABASE_URL, init_db  # noqa: E402 (must follow load_dotenv)
+from app.routers import uploads                      # noqa: E402
+from app.services.cleanup import run_cleanup_loop    # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging - no PII
@@ -67,6 +78,16 @@ async def lifespan(app: FastAPI):
     """
     dialect = DATABASE_URL.split(":")[0]
     logger.info("Starting Talush Barur (dialect=%s)", dialect)
+
+    # Phase 16.3/16.6: Startup diagnostic — confirm whether Groq key was loaded.
+    # Prints True/False so developer can immediately confirm .env was read.
+    _groq_key_present = bool(os.environ.get("GROQ_API_KEY"))
+    logger.info("DEBUG: Groq Key found: %s", _groq_key_present)
+    if not _groq_key_present:
+        logger.warning(
+            "GROQ_API_KEY is not set — LLM extraction will be unavailable. "
+            "Add GROQ_API_KEY to backend/.env to enable Groq-powered parsing."
+        )
 
     # Create tables on SQLite (no-op for Postgres - use alembic upgrade head)
     if "sqlite" in dialect:

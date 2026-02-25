@@ -1,18 +1,22 @@
 """
-llm_parser.py — Phase 14: LLM Intelligence Layer for Israeli Payslip Extraction.
+llm_parser.py — Phase 14/16.6: LLM Intelligence Layer for Israeli Payslip Extraction.
 
-Uses Google Gemini (gemini-2.0-flash-lite) to parse OCR text from payslips into
-a structured ParsedSlipPayload — replacing the brittle regex pipeline for the
-OCR path when a GEMINI_API_KEY is configured.
+Uses Groq (llama-3.3-70b-versatile) to parse OCR text from payslips into a
+structured ParsedSlipPayload — replacing the brittle regex pipeline for the OCR
+path when a GROQ_API_KEY is configured.
 
 Design decisions:
-  - response_mime_type="application/json"  → Gemini outputs guaranteed-valid JSON
-  - Pydantic validation before mapping      → schema mismatches trigger fallback
-  - No PII logged                           → only char counts and success/failure status
-  - Confidence fixed at 0.80               → between CONFIDENCE_EXACT (0.85) and
-                                              OCR_EXACT (0.638), LLM results are
-                                              accurate but not as verifiable as regex
-  - privacy_guess always "ספק שכר"          → never expose provider company name
+  - response_format={"type": "json_object"}  → Groq outputs guaranteed-valid JSON
+  - Pydantic validation before mapping        → schema mismatches trigger fallback
+  - No PII logged                             → only char counts and success/failure
+  - Confidence fixed at 0.80                 → between CONFIDENCE_EXACT (0.85) and
+                                                OCR_EXACT (0.638)
+  - privacy_guess always "ספק שכר"            → never expose provider company name
+
+Phase 16.6: Migrated from Google Gemini to Groq to avoid free-tier geo-blocks.
+  - gemini-2.0-flash-lite → 429 quota errors ("limit: 0")
+  - gemini-1.5-flash      → 404 not found on v1beta API
+  - groq llama-3.3-70b-versatile → free tier, no geo-block, fast
 
 Called from parse_with_ocr() in parser.py. Any exception propagates to the caller
 which silently falls back to the regex pipeline.
@@ -33,13 +37,14 @@ logger = logging.getLogger(__name__)
 # Configuration — no config.py; follow codebase pattern of direct os.getenv
 # ---------------------------------------------------------------------------
 
-_GEMINI_API_KEY: str | None = os.getenv("GEMINI_API_KEY")
+_GROQ_API_KEY: str | None = os.getenv("GROQ_API_KEY")
 
-# Gemini model — Flash Lite is fastest and cheapest; sufficient for JSON extraction
-_GEMINI_MODEL = "gemini-2.0-flash-lite"
+# Groq model — llama-3.3-70b-versatile: free tier, 6000 tokens/min, no geo-block.
+# Supports response_format={"type": "json_object"} for guaranteed JSON output.
+_GROQ_MODEL = "llama-3.3-70b-versatile"
 
-# Safety margin: Gemini flash context is large, but OCR text beyond 12K chars
-# is typically noise / duplicate pages.  Truncating keeps costs low.
+# Safety margin: keep input well within Groq's context window and rate limits.
+# OCR text beyond 12K chars is typically noise / duplicate pages anyway.
 _MAX_INPUT_CHARS = 12_000
 
 # Fixed confidence for LLM-extracted fields.  Between CONFIDENCE_EXACT (0.85)
@@ -50,39 +55,83 @@ _LLM_CONFIDENCE = 0.80
 # System Instruction — the prompt that guides Gemini's extraction
 # ---------------------------------------------------------------------------
 
-_SYSTEM_INSTRUCTION = """You are an Israeli Payroll Expert. Extract data from the payslip OCR text into exact JSON.
+_SYSTEM_INSTRUCTION = """You are an Israeli Payroll Expert. Extract data from an Israeli payslip OCR text and return it as a single JSON object matching the schema below EXACTLY.
 
-PRIVACY RULES (mandatory, no exceptions):
-- NEVER include or return employee name, employer name, or payroll provider company name anywhere in your JSON output.
-- Silently omit them — leave those fields null or absent.
+══════════════════════════════════════════
+OUTPUT SCHEMA (copy key names character-for-character)
+══════════════════════════════════════════
+{
+  "gross_pay":             <number | null>,
+  "net_pay":               <number | null>,
+  "income_tax":            <number | null>,
+  "national_insurance":    <number | null>,
+  "health_insurance":      <number | null>,
+  "pension_employee":      <number | null>,
+  "gross_taxable":         <number | null>,
+  "gross_ni":              <number | null>,
+  "total_payments_other":  <number | null>,
+  "pay_month":             <"YYYY-MM" string | null>,
+  "credit_points":         <number | null>,
+  "line_items": [
+    {
+      "description_hebrew": <string — REQUIRED, Hebrew label of the row>,
+      "category":           <"earning" | "deduction" | "employer_contribution" | "benefit_in_kind" | "balance">,
+      "value":              <number — REQUIRED, always positive>,
+      "quantity":           <number | null>,
+      "rate":               <number | null>
+    }
+  ]
+}
 
-EXTRACTION RULES:
-- gross_pay: use "סה\\"כ תשלומים" (Total Payments) as primary source.
-  Fall back to "ברוטו לצורך מס" or "ברוטו למס הכנסה" only if "סה\\"כ תשלומים" is absent.
-  Store the result in BOTH "gross_pay" and "total_payments_other".
-- net_pay: use "נטו לתשלום", "סכום בבנק", or "נטו בנק". Verify: net_pay ≈ gross_pay − total_deductions.
-- income_tax: extract from "מס הכנסה" rows. If missing from line items, search summary tables.
-- national_insurance: extract from "ביטוח לאומי" rows. If missing from line items, search summary tables.
-- health_insurance: extract from "מס בריאות".
-- gross_taxable: extract from "ברוטו לצורך מס" / "ברוטו למס הכנסה" if present.
-- gross_ni: extract from "ברוטו לביטוח לאומי" if present.
-- credit_points: extract from "נקודות זיכוי" if present.
-- pay_month: format as YYYY-MM (e.g. "2024-01"). Return null if not found.
-- Deduction signs: ALL deduction values MUST be POSITIVE numbers. Never use negative.
+CRITICAL KEY NAME RULES — these are the ONLY accepted key names:
+• Use "description_hebrew" (NOT "description", NOT "name", NOT "label", NOT "שם").
+• Use "category"           (NOT "type", NOT "kind").
+• Use "value"              (NOT "amount", NOT "sum", NOT "סכום").
+• Use "gross_pay"          (NOT "gross", NOT "ברוטו").
+• Use "net_pay"            (NOT "net", NOT "נטו").
+• Every line_item object MUST contain all three required keys: "description_hebrew", "category", "value".
 
-CLEANUP RULES:
-- Strip OCR artifacts from all description strings: remove standalone Latin words (DANN, NAD, DNN, MAN, ANN), date strings (DD/MM/YYYY), and isolated 4+-digit codes.
-- Keep Hebrew text clean and readable.
+CONCRETE EXAMPLE of a valid line_items array:
+"line_items": [
+  {"description_hebrew": "שכר בסיס",   "category": "earning",    "value": 6223.70, "quantity": 186.0, "rate": 33.46},
+  {"description_hebrew": "מס הכנסה",   "category": "deduction",  "value": 420.00,  "quantity": null,  "rate": null},
+  {"description_hebrew": "ביטוח לאומי","category": "deduction",  "value": 310.00,  "quantity": null,  "rate": null},
+  {"description_hebrew": "פנסיה מעסיק","category": "employer_contribution", "value": 621.00, "quantity": null, "rate": null}
+]
 
-LINE ITEMS:
-- Return every distinct payslip row as a line item with a clean Hebrew description.
-- category: one of "earning", "deduction", "employer_contribution", "benefit_in_kind", "balance"
-- Use "deduction" for: income_tax, national_insurance, health_insurance, pension_employee, and any ניכוי row.
-- Use "employer_contribution" for employer-side pension, severance, training fund rows.
-- If a row has quantity (כמות) and rate (תעריף), populate those fields.
-- value: always a positive float.
+══════════════════════════════════════════
+PRIVACY RULES (mandatory, no exceptions)
+══════════════════════════════════════════
+- NEVER include employee name, employer name, or payroll provider name anywhere in your output.
+- Silently omit them — leave those fields null or absent entirely.
 
-RETURN: Valid JSON ONLY — no markdown, no explanation, no code fences."""
+══════════════════════════════════════════
+ZERO HALLUCINATION POLICY
+══════════════════════════════════════════
+You are a strict OCR extraction engine. You MUST ONLY extract numbers exactly as they appear in the provided text. DO NOT perform any math or calculations. DO NOT invent or estimate numbers. If a value is unclear or not present in the text, return null for that field.
+
+══════════════════════════════════════════
+FIELD EXTRACTION RULES
+══════════════════════════════════════════
+- gross_pay / total_payments_other: Prefer the number labeled "סה"כ תשלומים". If absent, use "ברוטו לצורך מס" or "ברוטו למס הכנסה". Store the result in BOTH "gross_pay" and "total_payments_other".
+- net_pay: Prefer the number labeled "נטו לתשלום". If absent, use "סכום בבנק" or "נטו בנק". If none of these labels appear, return null.
+- income_tax: The number labeled "מס הכנסה". Return null if not found.
+- national_insurance: The number labeled "ביטוח לאומי". Return null if not found.
+- health_insurance: The number labeled "מס בריאות" or "ביטוח בריאות". Return null if not found.
+- gross_taxable: The number labeled "ברוטו לצורך מס" or "ברוטו למס הכנסה". Return null if not found.
+- gross_ni: The number labeled "ברוטו לביטוח לאומי". Return null if not found.
+- credit_points: The number labeled "נקודות זיכוי". Return null if not found.
+- pay_month: Format YYYY-MM derived from the payslip date. Return null if not found.
+- All deduction values MUST be POSITIVE numbers (never negative).
+
+Hint for tax tables: Tax values often appear in a single horizontal row aligned under their headers (e.g., מס הכנסה, ביטוח לאומי, ביטוח בריאות). Extract the exact numbers written in that row.
+
+CLEANUP: Strip OCR artifacts from description_hebrew strings — remove standalone Latin words (DANN, NAD, DNN), date strings (DD/MM/YYYY), and isolated 4+-digit codes. Keep Hebrew text only.
+
+══════════════════════════════════════════
+OUTPUT FORMAT
+══════════════════════════════════════════
+Return a single JSON object. No markdown, no code fences, no explanation — pure JSON only."""
 
 # ---------------------------------------------------------------------------
 # Pydantic schema for LLM response validation
@@ -160,6 +209,47 @@ _CATEGORY_EXPLANATIONS: dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# Phase 16: Accounting guardrail
+# ---------------------------------------------------------------------------
+
+def _validate_accounting(
+    gross: "float | None",
+    total_deductions: "float | None",
+    net_pay: "float | None",
+    tolerance: float = 1.0,
+) -> "tuple[bool, str]":
+    """
+    Lightweight accounting guardrail: verify that gross - total_deductions ≈ net_pay.
+
+    Returns (True, "")          when math checks out or inputs are insufficient.
+    Returns (False, message)    when |extracted_net - computed_net| > tolerance.
+
+    Always returns (True, "") when any input is None — conservative, no false positives.
+    tolerance=1.0 ILS absorbs rounding (agorah-level) differences.
+
+    This function is pure (no logging, no side-effects) so it is directly testable.
+    The caller is responsible for calling logger.warning() on a False result.
+    """
+    if gross is None or total_deductions is None or net_pay is None:
+        return (True, "")
+
+    computed_net = gross - total_deductions
+    delta = abs(net_pay - computed_net)
+
+    if delta > tolerance:
+        msg = (
+            f"Accounting guardrail: net discrepancy of {delta:.2f} ILS detected. "
+            f"gross={gross:.2f}, total_deductions={total_deductions:.2f}, "
+            f"computed_net={computed_net:.2f}, extracted_net={net_pay:.2f}. "
+            f"Re-evaluate deduction line items vs. payments — possible missed voluntary "
+            f"deductions or incorrect net field (שכר נטו vs. נטו לתשלום)."
+        )
+        return (False, msg)
+
+    return (True, "")
+
+
+# ---------------------------------------------------------------------------
 # Mapping helper
 # ---------------------------------------------------------------------------
 
@@ -224,6 +314,15 @@ def _map_to_payload(extracted: LLMExtractedPayload, answers=None) -> "ParsedSlip
     # --- Resolve gross: prefer total_payments_other, then gross_pay ---
     gross = extracted.total_payments_other or extracted.gross_pay
     net = extracted.net_pay
+
+    # --- Phase 16: Accounting guardrail (log-only; no retry/exception) ---
+    _acct_ok, _acct_msg = _validate_accounting(
+        gross=gross,
+        total_deductions=total_deductions,
+        net_pay=net,
+    )
+    if not _acct_ok:
+        logger.warning(_acct_msg)
 
     # --- Integrity check (reuses existing function) ---
     integrity_ok, integrity_notes = _run_integrity_checks(
@@ -328,11 +427,11 @@ def _map_to_payload(extracted: LLMExtractedPayload, answers=None) -> "ParsedSlip
 
 def llm_extract(full_text: str, answers=None) -> "ParsedSlipPayload":  # noqa: F821
     """
-    Send OCR text to Google Gemini and map the structured JSON response
-    to a ParsedSlipPayload.
+    Send OCR text to Groq (llama-3.3-70b-versatile) and map the structured
+    JSON response to a ParsedSlipPayload.
 
     Privacy guarantee:
-      - Raw OCR text is sent to Gemini but never logged (only char count is logged).
+      - Raw OCR text is sent to Groq but never logged (only char count is logged).
       - LLM response text is never logged.
       - System instruction explicitly forbids returning PII.
 
@@ -348,16 +447,18 @@ def llm_extract(full_text: str, answers=None) -> "ParsedSlipPayload":  # noqa: F
         ParsedSlipPayload with parse_source="ocr_llm".
     """
     # Refresh at call time so tests can patch os.environ after import
-    api_key = os.getenv("GEMINI_API_KEY") or _GEMINI_API_KEY
+    api_key = os.getenv("GROQ_API_KEY") or _GROQ_API_KEY
     if not api_key:
         raise RuntimeError(
-            "GEMINI_API_KEY is not set — LLM extraction unavailable. "
-            "Set GEMINI_API_KEY in your .env file to enable Gemini extraction."
+            "GROQ_API_KEY is not set — LLM extraction unavailable. "
+            "Set GROQ_API_KEY in your .env file to enable Groq-powered extraction."
         )
 
-    import google.generativeai as genai  # lazy import: not required if key absent
+    logger.info("LLM: API key present (%d chars), configuring %s", len(api_key), _GROQ_MODEL)
 
-    genai.configure(api_key=api_key)
+    from groq import Groq  # lazy import: not required if key absent
+
+    client = Groq(api_key=api_key)
 
     # Truncate input to avoid excessive token usage / cost
     truncated_text = full_text[:_MAX_INPUT_CHARS]
@@ -365,24 +466,63 @@ def llm_extract(full_text: str, answers=None) -> "ParsedSlipPayload":  # noqa: F
         "LLM: sending %d chars (truncated from %d) to %s",
         len(truncated_text),
         len(full_text),
-        _GEMINI_MODEL,
+        _GROQ_MODEL,
     )
 
-    prompt = (
-        f"{_SYSTEM_INSTRUCTION}"
-        f"\n\n---OCR TEXT START---\n{truncated_text}\n---OCR TEXT END---"
-    )
+    # Groq chat-completions API: system instruction + user message with OCR text
+    messages = [
+        {
+            "role": "system",
+            "content": _SYSTEM_INSTRUCTION,
+        },
+        {
+            "role": "user",
+            "content": (
+                f"---OCR TEXT START---\n{truncated_text}\n---OCR TEXT END---"
+            ),
+        },
+    ]
 
-    model = genai.GenerativeModel(_GEMINI_MODEL)
-    response = model.generate_content(
-        prompt,
-        generation_config={"response_mime_type": "application/json"},
-    )
+    try:
+        completion = client.chat.completions.create(
+            model=_GROQ_MODEL,
+            messages=messages,
+            response_format={"type": "json_object"},  # guaranteed JSON output
+            temperature=0,   # deterministic — payslip extraction is not creative
+        )
+    except Exception as api_exc:
+        # Log the full exception type and message so the developer can see exactly
+        # what failed (authentication error, rate limit, network timeout, etc.)
+        logger.error(
+            "LLM: Groq API call failed — %s: %s",
+            type(api_exc).__name__,
+            api_exc,
+        )
+        raise  # propagate to parse_with_ocr() → triggers regex fallback
 
-    # Parse and validate (any error propagates to caller → fallback)
-    raw_json = response.text
-    data = json.loads(raw_json)
-    extracted = LLMExtractedPayload.model_validate(data)
+    # Extract the text from the first (and only) choice
+    raw_json = completion.choices[0].message.content or ""
+    logger.debug("LLM: raw response length=%d chars", len(raw_json))
+
+    try:
+        data = json.loads(raw_json)
+    except json.JSONDecodeError as json_exc:
+        logger.error(
+            "LLM: JSON decode failed — %s. First 500 chars of response: %r",
+            json_exc,
+            raw_json[:500],
+        )
+        raise
+
+    try:
+        extracted = LLMExtractedPayload.model_validate(data)
+    except Exception as val_exc:
+        logger.error(
+            "LLM: Pydantic validation failed — %s: %s",
+            type(val_exc).__name__,
+            val_exc,
+        )
+        raise
 
     logger.info(
         "LLM: extraction successful — %d line items, gross=%s, net=%s",

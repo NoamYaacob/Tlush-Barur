@@ -5,6 +5,7 @@ Upload routes (Phase 2A – DB-backed):
   POST  /api/uploads/{upload_id}/answers       – upsert answers in DB → trigger processing
   POST  /api/uploads/{upload_id}/credits-wizard – Phase 5: tax credits wizard (stateless)
   PATCH /api/uploads/{upload_id}/corrections   – Phase 6: apply user corrections + recompute
+  GET   /api/uploads/{upload_id}/pdf           – Phase 17: stream professional Hebrew PDF report
 """
 
 from __future__ import annotations
@@ -404,3 +405,68 @@ async def apply_corrections_endpoint(
     )
 
     return updated
+
+
+# ---------------------------------------------------------------------------
+# Phase 17: PDF Export
+# ---------------------------------------------------------------------------
+
+@router.get("/{upload_id}/pdf")
+async def export_payslip_pdf(
+    upload_id: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """
+    GET /api/uploads/{upload_id}/pdf
+
+    Generate and stream a professional Hebrew/RTL PDF report for the given upload.
+
+    Returns:
+        200 + application/pdf stream on success.
+        404 if upload not found or result not stored.
+        409 if analysis is still in progress.
+
+    Privacy: PDF contains no employee/employer names (always null in payload schema).
+    """
+    import io
+    from fastapi.responses import StreamingResponse
+    from app.services.export_service import generate_pdf
+
+    # -- Fetch upload row --
+    row = await get_upload(db, upload_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail={"error": "העלאה לא נמצאה"})
+
+    if row.status != "done":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "הניתוח עדיין לא הסתיים — נסה שוב בעוד רגע"},
+        )
+
+    # -- Load parsed result --
+    result_dict = await get_result(db, upload_id)
+    if not result_dict:
+        raise HTTPException(status_code=404, detail={"error": "תוצאת ניתוח לא נמצאה"})
+
+    payload = ParsedSlipPayload.model_validate(result_dict)
+
+    # -- Generate PDF bytes --
+    pdf_bytes = generate_pdf(payload)
+
+    # -- Build safe filename from pay_month --
+    month = (payload.slip_meta.pay_month or "export").replace("-", "_")
+    filename = f"tlush_barur_{month}.pdf"
+
+    logger.info(
+        "PDF export for upload_id=%s: %d bytes, filename=%s",
+        upload_id, len(pdf_bytes), filename,
+    )
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(pdf_bytes)),
+        },
+    )
