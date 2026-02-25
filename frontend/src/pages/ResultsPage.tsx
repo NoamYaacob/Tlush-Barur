@@ -478,19 +478,20 @@ function BreakdownTab({ result, savingField, onCorrection }: BreakdownTabProps) 
               const liCorrected = correctedPaths.has(liFieldPath);
               return (
                 <div key={li.id} className="border-b border-gray-100 last:border-0">
-                  {/* Row header — name on left, editable value on right */}
+                  {/* Row header — name on left, quantity/rate in middle, editable value on right */}
                   <div className="w-full flex justify-between items-center px-5 py-3 hover:bg-gray-50 transition-colors">
-                    {/* Left: expand toggle + name */}
+                    {/* Left: expand toggle + name + unknown badge (deductions only) */}
                     <button
                       type="button"
                       onClick={() => toggle(li.id)}
                       className="flex items-center gap-2 text-right flex-1 min-w-0"
                     >
                       <div className="flex items-center gap-2 min-w-0">
-                        <span className={`font-medium text-sm truncate ${li.is_unknown ? "text-orange-600" : "text-gray-800"}`}>
+                        <span className={`font-medium text-sm truncate ${li.is_unknown && li.category === "deduction" ? "text-orange-600" : "text-gray-800"}`}>
                           {li.description_hebrew}
                         </span>
-                        {li.is_unknown && (
+                        {/* Phase 9: only show 'לא מזוהה' badge for deductions — not for informational earning rows */}
+                        {li.is_unknown && li.category === "deduction" && (
                           <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full flex-shrink-0">
                             לא מזוהה
                           </span>
@@ -499,8 +500,23 @@ function BreakdownTab({ result, savingField, onCorrection }: BreakdownTabProps) 
                       <span className="text-gray-400 text-xs flex-shrink-0">{expanded.has(li.id) ? "▲" : "▼"}</span>
                     </button>
 
+                    {/* Phase 9: Quantity × Rate columns — shown inline when available */}
+                    {(li.quantity != null || li.rate != null) && (
+                      <div className="flex items-center gap-3 text-xs text-gray-400 flex-shrink-0 mx-3 font-mono" dir="ltr">
+                        {li.quantity != null && (
+                          <span title="כמות">{li.quantity.toLocaleString("he-IL", { maximumFractionDigits: 2 })}</span>
+                        )}
+                        {li.quantity != null && li.rate != null && (
+                          <span className="text-gray-300">×</span>
+                        )}
+                        {li.rate != null && (
+                          <span title="תעריף">₪{li.rate.toLocaleString("he-IL", { maximumFractionDigits: 2 })}</span>
+                        )}
+                      </div>
+                    )}
+
                     {/* Right: editable value */}
-                    <div className="flex-shrink-0 mr-3" onClick={(e) => e.stopPropagation()}>
+                    <div className="flex-shrink-0" onClick={(e) => e.stopPropagation()}>
                       <EditableNumber
                         value={li.value}
                         fieldPath={liFieldPath}

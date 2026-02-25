@@ -488,28 +488,24 @@ def test_extract_line_items_ocr_earnings():
 
 def test_extract_line_items_ocr_deductions():
     """
-    Phase 2D.2: extract_line_items_ocr() must correctly classify deductions
-    found in the payslip OCR text.
+    Phase 10: extract_line_items_ocr() must correctly classify deductions
+    found in the payslip OCR text using the generic section-scanning engine.
 
-    The deductions section starts after the stop anchor 'ניכויי חובה'.
-    However, extract_line_items_ocr() only parses lines INSIDE the table region.
-    The deduction rows (national_ins, health) appear AFTER the stop anchor,
-    so they are not extracted by extract_line_items_ocr() from the table.
-
-    This test verifies the FULL pipeline behavior: parse_with_ocr supplements
-    the table items with summary-box deduction rows.
-
-    For unit testing extract_line_items_ocr() alone, we embed deduction rows
-    INSIDE the table region (before any stop anchor).
+    The new engine detects section headers (e.g. 'ניכויי חובה') and assigns
+    LineItemCategory.DEDUCTION to all rows captured under that header.
+    Deduction rows no longer need to be embedded inside the earnings table —
+    they are captured from their own labelled section below the earnings section.
     """
     from app.services.parser import extract_line_items_ocr
     from app.models.schemas import LineItemCategory
 
-    # Embed deduction rows inside the table region (no stop anchor)
+    # Fixture includes a 'ניכויי חובה' section header so deductions are captured
+    # from their own section (the Phase 10 paradigm).
     sample = """\
 פרוט התשלומים
 משכורת בסיס 5,000.00
 נסיעות 380.00
+ניכויי חובה
 מס הכנסה 334.00
 ביטוח לאומי 253.00
 מס בריאות 81.00

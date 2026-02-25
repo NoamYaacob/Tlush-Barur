@@ -85,6 +85,8 @@ export interface LineItem {
   is_unknown: boolean;
   unknown_guesses: string[];
   unknown_question: string | null;
+  quantity: number | null;   // Phase 8/9: כמות (units/hours/days)
+  rate: number | null;       // Phase 8/9: תעריף (rate per unit)
 }
 
 export interface Anomaly {

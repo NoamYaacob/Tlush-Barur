@@ -1601,11 +1601,14 @@ def _run_extended_checks(
                 ),
                 what_to_do=(
                     f"בדוק עם מחלקת שכר שתעריף ההבראה עדכני. "
-                    f"המינימום החוקי הוא ₪{_CONVALESCENCE_DAILY_RATE_MIN:.0f} ליום."
+                    f"המינימום החוקי הוא ₪{_CONVALESCENCE_DAILY_RATE_MIN:.0f} ליום. "
+                    f"לתשומת לבך: אם דמי ההבראה משולמים באופן חודשי יחסי, "
+                    f"התעריף עשוי להיראות נמוך מהקבוע בחוק (₪{_CONVALESCENCE_DAILY_RATE_MIN:.0f})."
                 ),
                 ask_payroll=(
                     f"מה תעריף יום ההבראה שלי? "
-                    f"המינימום החוקי הוא ₪{_CONVALESCENCE_DAILY_RATE_MIN:.0f}."
+                    f"המינימום החוקי הוא ₪{_CONVALESCENCE_DAILY_RATE_MIN:.0f}. "
+                    f"האם דמי ההבראה משולמים באופן חודשי יחסי?"
                 ),
                 related_line_item_ids=[getattr(convalescence_item, "id", "")],
             ))
@@ -2153,6 +2156,15 @@ _LI_CONF_KNOWN   = 0.70   # keyword matched a known item
 _LI_CONF_UNKNOWN = 0.35   # no keyword match — unknown item
 
 
+def _sign_for_category(category: "LineItemCategory", abs_value: float) -> float:
+    """
+    Phase 10: Return the correctly-signed value for a given LineItemCategory.
+    Deductions are stored as negative values; all other categories are positive.
+    """
+    from app.models.schemas import LineItemCategory as _LIC
+    return -abs_value if category == _LIC.DEDUCTION else abs_value
+
+
 def _count_hebrew(text: str) -> tuple[int, int]:
     """Return (hebrew_char_count, non_space_char_count) for text."""
     non_space = sum(1 for c in text if not c.isspace())
@@ -2193,6 +2205,7 @@ def _classify_line_item(
     line: str,
     item_index: int,
     page_index: int,
+    default_category: "LineItemCategory | None" = None,
 ) -> "LineItem | None":
     """
     Try to classify one OCR table row as a LineItem.
@@ -2205,6 +2218,10 @@ def _classify_line_item(
       5. If keyword matched: return labeled LineItem.
       6. If no keyword matches: return 'unknown' item (only when Hebrew present).
       7. Returns None if no money amount is found.
+
+    Phase 10: default_category — when provided by the section-scanning engine,
+    unknown items (step 6) are assigned this category instead of defaulting to
+    EARNING. Known-keyword items always use the category from _LI_KNOWN_ITEMS.
     """
     from app.models.schemas import LineItem, LineItemCategory  # local import
 
@@ -2332,7 +2349,7 @@ def _classify_line_item(
 
     return LineItem(
         id=f"li_ocr_unk_{item_index}",
-        category=LineItemCategory.EARNING,   # default — user should verify
+        category=default_category or LineItemCategory.EARNING,   # Phase 10: section context wins; fallback EARNING
         description_hebrew=line.strip()[:40] or "שורה לא מזוהה",
         explanation_hebrew=(
             "שורה זו לא זוהתה על-ידי המערכת. "
@@ -2356,110 +2373,134 @@ def extract_line_items_ocr(
     adapter: "ProviderAdapter | None" = None,  # type: ignore[name-defined]
 ) -> "list[LineItem]":
     """
-    Extract payslip line items from OCR text by:
-      1. Finding the earnings table anchor (adapter.TABLE_START_PATTERNS).
-      2. Collecting lines until a stop anchor is hit (adapter.TABLE_STOP_PATTERNS).
-      3. Classifying each line with _classify_line_item().
-      4. De-duplicating by (description + rounded_value) to avoid OCR duplicate reads.
+    Legacy entry point — delegates to extract_line_items_by_sections().
 
-    Also extracts employer-contribution rows from any section that appears
-    *after* the earnings table but *before* the summary-box footer region.
-
-    Phase 3: accepts an optional ProviderAdapter; falls back to GenericAdapter
-    (which uses the same patterns as the original module-level constants) when
-    adapter is None. This preserves backward compatibility with existing tests.
-
-    Returns a list of LineItem objects (potentially empty if no anchor found).
+    Phase 10: The original anchor→collect→stop implementation has been replaced
+    by the generic section-scanning engine in extract_line_items_by_sections().
+    This wrapper is preserved for backward compatibility with existing tests and
+    any external callers that reference extract_line_items_ocr by name.
     """
-    from app.services.adapters import GenericAdapter as _GenericAdapter  # local import: avoids circular dep at module level
-    _adapter = adapter if adapter is not None else _GenericAdapter()
-    table_start_patterns = _adapter.TABLE_START_PATTERNS
-    table_stop_patterns = _adapter.TABLE_STOP_PATTERNS
+    return extract_line_items_by_sections(pages_text, adapter)
 
-    items: list = []
-    seen: set[tuple[str, float]] = set()   # (display_name, rounded_amount) dedup key
+
+def extract_line_items_by_sections(
+    pages_text: dict[int, str],
+    adapter: "ProviderAdapter | None" = None,
+) -> "list[LineItem]":
+    """
+    Phase 10: Universal section-scanning line-item extractor.
+
+    Replaces the anchor→collect→stop pattern of extract_line_items_ocr() with a
+    top-to-bottom page scan that detects ALL section headers and assigns a
+    LineItemCategory to every row captured under each header.
+
+    Algorithm (per page):
+      1. Maintain current_section_def (SectionDef | None).
+      2. For each line:
+         a. If _line_amounts(line) is empty (no monetary amounts → likely a header):
+            - Check the line (and `prev_line + " " + line` for OCR-split headers)
+              against every SectionDef.header_patterns in adapter.SECTION_DEFINITIONS.
+            - First match → set current_section_def to that SectionDef; skip row.
+         b. If current_section_def is not None:
+            - Call _classify_line_item(line, ..., default_category=section_category)
+              to get enrichment (display name, explanation) from _LI_KNOWN_ITEMS.
+            - Override the returned item's category and value sign to match the
+              active section (section context always wins over keyword category).
+            - Deduplicate by (description_hebrew, rounded_abs_value) and append.
+         c. If current_section_def is None (no section header encountered yet):
+            - Call _classify_line_item(line, ...) without default_category.
+            - Only emit the item if it is NOT is_unknown (known-keyword fallback).
+            - This preserves backward compat for layouts with no section headers.
+      3. prev_line tracks the previous line for two-line sliding-window header check.
+
+    The function preserves the same signature as extract_line_items_ocr() so it
+    can be called as a drop-in replacement. extract_line_items_ocr() delegates here.
+
+    Args:
+        pages_text: {page_index: ocr_text} dict from ocr_file().
+        adapter:    Provider-specific adapter. Falls back to GenericAdapter when None.
+
+    Returns:
+        list[LineItem], potentially empty.
+    """
+    from app.services.adapters import GenericAdapter as _GenericAdapter
+    from app.models.schemas import LineItem, LineItemCategory
+
+    _adapter = adapter if adapter is not None else _GenericAdapter()
+    section_defs = _adapter.SECTION_DEFINITIONS
+
+    # Map category string → enum (local, no circular import)
+    _CAT_MAP: dict[str, LineItemCategory] = {
+        "earning":               LineItemCategory.EARNING,
+        "deduction":             LineItemCategory.DEDUCTION,
+        "employer_contribution": LineItemCategory.EMPLOYER_CONTRIBUTION,
+        "benefit_in_kind":       LineItemCategory.BENEFIT_IN_KIND,
+        "balance":               LineItemCategory.BALANCE,
+    }
+
+    items: list[LineItem] = []
+    seen: set[tuple[str, float]] = set()
     item_counter = 0
 
     for page_idx, text in pages_text.items():
         lines = text.splitlines()
-        n = len(lines)
+        current_section_def = None   # SectionDef | None
+        prev_line = ""
 
-        # Phase A: find the earnings table start anchor
-        table_start: int | None = None
-        for i, line in enumerate(lines):
-            if any(p.search(line) for p in table_start_patterns):
-                table_start = i
-                break
+        for line in lines:
+            # ── Step a: header detection ───────────────────────────────────
+            # Only consider lines that have NO monetary amounts as potential headers.
+            # A row like "ניכויי חובה 50.00" is a data row, not a section header.
+            if not _line_amounts(line):
+                matched_def = None
+                # Check the line alone, then a two-line window (OCR split headers)
+                for candidate in (line, prev_line + " " + line):
+                    for sec_def in section_defs:
+                        if any(p.search(candidate) for p in sec_def.header_patterns):
+                            matched_def = sec_def
+                            break
+                    if matched_def is not None:
+                        break
+                if matched_def is not None:
+                    current_section_def = matched_def
+                    prev_line = line
+                    continue   # header line itself is not a data row
 
-        if table_start is None:
-            # No earnings table anchor — try to extract any recognizable items
-            # from the full page as a fallback.
-            for i, line in enumerate(lines):
-                item = _classify_line_item(line, item_counter, page_idx)
+            # ── Step b: inside a recognized section ───────────────────────
+            if current_section_def is not None:
+                section_category = _CAT_MAP.get(
+                    current_section_def.category_str, LineItemCategory.EARNING
+                )
+                item = _classify_line_item(
+                    line, item_counter, page_idx,
+                    default_category=section_category,
+                )
                 if item is not None:
+                    # Section context always determines category and value sign.
+                    signed_value = _sign_for_category(
+                        section_category, abs(item.value or 0)
+                    )
+                    item = item.model_copy(update={
+                        "category": section_category,
+                        "value": signed_value,
+                    })
+                    key = (item.description_hebrew, round(abs(signed_value), 0))
+                    if key not in seen:
+                        seen.add(key)
+                        items.append(item)
+                        item_counter += 1
+
+            # ── Step c: no section header seen yet — known-keyword fallback ──
+            else:
+                item = _classify_line_item(line, item_counter, page_idx)
+                if item is not None and not item.is_unknown:
                     key = (item.description_hebrew, round(abs(item.value or 0), 0))
                     if key not in seen:
                         seen.add(key)
                         items.append(item)
                         item_counter += 1
-            continue
 
-        # Phase B: collect lines from table_start+1 until a stop anchor
-        collect_end = n   # default: collect to end of page
-        for i in range(table_start + 1, n):
-            if any(p.search(lines[i]) for p in table_stop_patterns):
-                collect_end = i
-                break
-
-        table_lines = lines[table_start + 1 : collect_end]
-
-        for line in table_lines:
-            item = _classify_line_item(line, item_counter, page_idx)
-            if item is not None:
-                key = (item.description_hebrew, round(abs(item.value or 0), 0))
-                if key not in seen:
-                    seen.add(key)
-                    items.append(item)
-                    item_counter += 1
-
-        # Phase C: scan remaining lines after the earnings table for
-        # employer contributions (provident funds, severance, training funds, etc.)
-        for i in range(collect_end, n):
-            line = lines[i]
-            # Only pick up lines that match employer-contribution keywords
-            is_employer = any(
-                re.search(kw, line, re.UNICODE | re.IGNORECASE)
-                for kw in [
-                    r'הפרש\S{0,3}\s+מעסיק', r'פנסי\S{0,3}\s+מעסיק',
-                    r'השתלמות\s+מעסיק', r'קרן\s+ה?תשתלמות', r'קרן\s+השתלמ',
-                    r'פיצויים', r'קרן\s+פיצוי',
-                    r'תגמולי\s+מעסיק', r'בריאות\s+מעסיק', r'ריסק\s+מעסיק',
-                    r'קצבה\s+שכיר', r'קצבה\s+מעסיק',   # Harel/pension scheme
-                    r'הראל', r'מנורה', r'מגדל', r'כלל',   # known Israeli insurers
-                ]
-            )
-            if not is_employer:
-                continue
-            item = _classify_line_item(line, item_counter, page_idx)
-            if item is not None:
-                # Force employer_contribution category for these lines
-                from app.models.schemas import LineItem as _LI, LineItemCategory as _LIC
-                if item.category != _LIC.EMPLOYER_CONTRIBUTION:
-                    # Re-classify as employer_contribution (Pydantic model_copy).
-                    # Also make value positive (employer contributions are positive).
-                    item = item.model_copy(update={
-                        "category": _LIC.EMPLOYER_CONTRIBUTION,
-                        "value": abs(item.value or 0),
-                        "explanation_hebrew": (
-                            "הפרשת מעסיק לפנסיה, קרן השתלמות, או ביטוח. "
-                            "כסף זה נצבר על שמך ונפרש לטובת פרישה או חיסכון."
-                        ),
-                    })
-                key = (item.description_hebrew, round(abs(item.value or 0), 0))
-                if key not in seen:
-                    seen.add(key)
-                    items.append(item)
-                    item_counter += 1
+            prev_line = line
 
     return items
 
@@ -2905,8 +2946,8 @@ def parse_with_ocr(
         integrity_notes = integrity_notes + [_net_fallback_note]
 
     # Build line items — Phase 2D.2: real table extraction + summary-box supplements
-    # Step 1: extract real table rows from OCR text (Phase 3: pass provider adapter)
-    line_items: list[LineItem] = extract_line_items_ocr(pages_text, adapter)
+    # Step 1: Phase 10 — generic section-scanning engine replaces anchor→stop approach.
+    line_items: list[LineItem] = extract_line_items_by_sections(pages_text, adapter)
 
     # Step 2: supplement with summary-box-derived deduction items if not already
     # captured from the earnings table (income_tax, national_ins, health).
@@ -3024,6 +3065,34 @@ def parse_with_ocr(
             page_index=total_payments_other_field.source_page,
         ))
 
+    # Phase 9: back-fill summary scalars from extracted line items when pattern extraction failed.
+    # This ensures income_tax / national_ins / health appear in summary cards even when
+    # OCR summary-box patterns miss them but the earnings table extraction succeeded.
+    if income_tax is None:
+        _li_tax = next((li for li in line_items if li.id == "li_income_tax"
+                        or "מס הכנסה" in getattr(li, "description_hebrew", "")), None)
+        if _li_tax and _li_tax.value is not None:
+            income_tax = abs(_li_tax.value)
+    if national_ins is None:
+        _li_ni = next((li for li in line_items
+                       if li.id == "li_national_ins"
+                       or "ביטוח לאומי" in getattr(li, "description_hebrew", "")
+                       and getattr(li, "category", None) in (LineItemCategory.DEDUCTION, "deduction")), None)
+        if _li_ni and _li_ni.value is not None:
+            national_ins = abs(_li_ni.value)
+    if health is None:
+        _li_health = next((li for li in line_items
+                           if li.id == "li_health"
+                           or ("בריאות" in getattr(li, "description_hebrew", "") or "מס בריאות" in getattr(li, "description_hebrew", ""))
+                           and getattr(li, "category", None) in (LineItemCategory.DEDUCTION, "deduction")), None)
+        if _li_health and _li_health.value is not None:
+            health = abs(_li_health.value)
+
+    # Recompute known_deductions / total_deductions after any back-fill promotions above
+    known_deductions = sum(d for d in [income_tax, national_ins, health] if d is not None)
+    if known_deductions > 0:
+        total_deductions = known_deductions
+
     # Phase 4: resolve net_salary / net_to_pay scalars for extended anomaly checks
     _net_salary_val  = net_salary_field.value  if net_salary_field  else None
     _net_to_pay_val  = net_to_pay_field.value  if net_to_pay_field  else None
@@ -3086,7 +3155,7 @@ def parse_with_ocr(
             income_tax=income_tax,
             national_insurance=national_ins,
             health_insurance=health,
-            pension_employee=None,
+            pension_employee=provident_funds_field.value if provident_funds_field else None,  # Phase 9: promote provident_funds → pension summary card
             integrity_ok=integrity_ok,
             integrity_notes=integrity_notes,
             total_payments_other=total_payments_other_field.value if total_payments_other_field else None,
