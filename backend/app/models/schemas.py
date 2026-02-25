@@ -121,6 +121,21 @@ class Anomaly(BaseModel):
     related_line_item_ids: list[str] = Field(default_factory=list)
 
 
+class Insight(BaseModel):
+    """
+    Phase 15: Educational insight card — plain-Hebrew explanation of what
+    appears in the payslip and why it is good / normal / worth checking.
+
+    kind: "info"    → blue card  — neutral explanation
+          "success" → green card — positive / compliant finding
+          "warning" → yellow card — something worth double-checking
+    """
+    id: str
+    kind: str          # "info" | "success" | "warning"
+    title: str         # short Hebrew title shown on card header (≤60 chars)
+    body: str          # full Hebrew explanation (1-3 sentences)
+
+
 class SectionBlock(BaseModel):
     section_name: str
     section_type: str = "page"   # "earnings_table" | "deductions_section" |
@@ -169,6 +184,9 @@ class ParsedSlipPayload(BaseModel):
     summary: SummaryTotals
     line_items: list[LineItem]
     anomalies: list[Anomaly]
+    # Phase 15: Educational insights — plain-Hebrew explanations of payslip data.
+    # Empty list for error states (OCR_UNAVAILABLE, INVALID_DOCUMENT, etc.).
+    insights: list[Insight] = Field(default_factory=list)
     blocks: list[SectionBlock]
     tax_credits_detected: Optional[TaxCreditsDetected] = None
     answers_applied: bool = False   # True once quick-answers were used

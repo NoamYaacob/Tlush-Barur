@@ -1,6 +1,8 @@
 """
 OCR service for Israeli payslips.
 Phase 2C: Tesseract-based OCR for scanned PDFs and image files.
+Phase 12: Spatial table reconstruction — uses image_to_data bounding boxes
+          to reassemble RTL Hebrew rows before passing text to the parser.
 
 All functions are synchronous; callers must wrap with asyncio.to_thread().
 """
@@ -16,6 +18,20 @@ if TYPE_CHECKING:
     pass
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Spatial reconstruction constants
+# ---------------------------------------------------------------------------
+
+# Words whose top-coordinate differs by ≤ this many pixels (on the 2× upscaled
+# image) are grouped into the same logical row.  At 400 DPI equivalent, a typical
+# Hebrew character is ~30-40 px tall, so 20 px comfortably groups characters on
+# the same baseline without merging adjacent rows.
+_ROW_GROUP_TOLERANCE_PX = 20
+
+# Minimum Tesseract word confidence (0-100) to include a word. Anything below
+# this threshold is likely noise from redaction halos or scanner artifacts.
+_MIN_WORD_CONFIDENCE = 30
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +97,7 @@ def _convert_heic_to_pil(file_path: Path):
     Uses pillow-heif's register_heif_opener() (idempotent).
     """
     from pillow_heif import register_heif_opener
+
     register_heif_opener()
     from PIL import Image
     return Image.open(str(file_path))
@@ -90,32 +107,56 @@ def _preprocess_image(img):
     """
     Prepare a PIL Image for OCR:
       1. EXIF auto-rotate (critical for smartphone portrait photos)
-      2. Convert to grayscale
-      3. Adaptive threshold (OpenCV if available, else simple PIL threshold)
+      2. Upscale 2× using LANCZOS — dramatically improves Tesseract on small payslip fonts
+      3. Convert to grayscale
+      4. Adaptive threshold with block_size scaled to 2× image (31px, not 11px)
+         — 11px was correct for original size but becomes too coarse after upscaling.
+         — Also uses Otsu's method as a second pass to neutralise heavy marker redactions.
+
     Returns a processed PIL Image in mode "L" (grayscale).
     """
-    from PIL import ImageOps
+    from PIL import ImageOps, Image as _PILImage
 
     # Step 1: EXIF rotate
     img = ImageOps.exif_transpose(img)
 
-    # Step 2: Grayscale
+    # Step 2: Upscale 2× — Tesseract works best at ≥300 DPI equivalent.
+    # 200 DPI (pdf2image default) × 2 = 400 DPI equivalent.
+    # LANCZOS is the highest-quality PIL resampling filter for text images.
+    w, h = img.size
+    img = img.resize((w * 2, h * 2), _PILImage.LANCZOS)
+
+    # Step 3: Grayscale
     img = img.convert("L")
 
-    # Step 3: Threshold for cleaner OCR
+    # Step 4: Binarisation — two-pass strategy for redacted documents
+    # Pass A: Adaptive Gaussian threshold with block_size=31 (scaled for 2× image;
+    #         original block_size=11 at 1× ≈ 31 at 2× keeping the same physical size).
+    # Pass B: Otsu global threshold blended in — neutralises large solid-black
+    #         redaction rectangles that confuse adaptive methods.
     try:
         import cv2
         import numpy as np
         arr = np.array(img)
-        # Adaptive Gaussian threshold: block_size=11, C=2
-        thresholded = cv2.adaptiveThreshold(
+
+        # Pass A: adaptive threshold (handles local lighting variation)
+        adaptive = cv2.adaptiveThreshold(
             arr, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY,
-            11, 2
+            31, 10  # block_size=31 (was 11 pre-upscale), C=10
         )
+
+        # Pass B: Otsu global threshold (turns heavy black rectangles to pure black,
+        # leaving text regions as white-on-black cleanly)
+        _, otsu = cv2.threshold(arr, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+        # Combine: take the lighter pixel from each pass so text (dark) is preserved
+        # and noisy halos from redactions are suppressed
+        combined = cv2.max(adaptive, otsu)
+
         from PIL import Image
-        img = Image.fromarray(thresholded)
+        img = Image.fromarray(combined)
     except ImportError:
         # Fall back to simple point threshold if OpenCV not available
         img = img.point(lambda x: 0 if x < 128 else 255)
@@ -138,6 +179,89 @@ def _pdf_to_images(file_path: Path, max_pages: int = 3) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Phase 12: Spatial line reconstruction
+# ---------------------------------------------------------------------------
+
+def _spatial_reconstruct_lines(img, lang: str = "heb+eng") -> str:
+    """
+    Run Tesseract with image_to_data to obtain per-word bounding boxes, then
+    reconstruct spatially correct text lines from those coordinates.
+
+    This function:
+      1) Calls image_to_data to get (word, left, top, confidence) for each token.
+      2) Filters out words with confidence < _MIN_WORD_CONFIDENCE.
+      3) Groups words into rows if their `top` differs by ≤ _ROW_GROUP_TOLERANCE_PX.
+      4) Sorts rows top-to-bottom.
+      5) Within each row, sorts words RIGHT-to-LEFT (descending `left`) for Hebrew.
+      6) Joins words within row by space, rows by newline.
+
+    Returns reconstructed text; falls back to image_to_string on any exception.
+    """
+    import pytesseract
+    from pytesseract import Output
+
+    try:
+        data = pytesseract.image_to_data(
+            img,
+            lang=lang,
+            config="--psm 11",
+            output_type=Output.DICT,
+        )
+
+        n = len(data["text"])
+        words: list[tuple[int, int, str]] = []  # (top, left, word)
+
+        for i in range(n):
+            word = (data["text"][i] or "").strip()
+            if not word:
+                continue
+            try:
+                conf = int(data["conf"][i])
+            except (ValueError, TypeError):
+                conf = -1
+            if conf < _MIN_WORD_CONFIDENCE:
+                continue
+            top = int(data["top"][i])
+            left = int(data["left"][i])
+            words.append((top, left, word))
+
+        if not words:
+            raise ValueError("no words survived confidence filter")
+
+        # Group into rows by top coordinate
+        words.sort(key=lambda w: w[0])  # by top
+        rows: list[list[tuple[int, int, str]]] = []
+        current_row: list[tuple[int, int, str]] = []
+        row_anchor_top: int = -9999
+
+        for top, left, word in words:
+            if not current_row or abs(top - row_anchor_top) <= _ROW_GROUP_TOLERANCE_PX:
+                current_row.append((top, left, word))
+                row_anchor_top = sum(w[0] for w in current_row) // len(current_row)
+            else:
+                rows.append(current_row)
+                current_row = [(top, left, word)]
+                row_anchor_top = top
+
+        if current_row:
+            rows.append(current_row)
+
+        # Build output text: RTL sort inside each row (desc left)
+        output_lines: list[str] = []
+        for row in rows:
+            row_sorted = sorted(row, key=lambda w: w[1], reverse=True)
+            output_lines.append(" ".join(w[2] for w in row_sorted))
+
+        return "\n".join(output_lines)
+
+    except Exception as exc:
+        logger.warning(
+            "_spatial_reconstruct_lines failed (%s), falling back to image_to_string", exc
+        )
+        return pytesseract.image_to_string(img, lang=lang, config="--psm 11")
+
+
+# ---------------------------------------------------------------------------
 # Main OCR entry point
 # ---------------------------------------------------------------------------
 
@@ -145,45 +269,34 @@ def ocr_file(file_path: Path, mime_type: str) -> dict[int, str]:
     """
     Run Tesseract OCR on a file and return {page_index: text}.
 
-    Routing by MIME type:
-      - application/pdf  → rasterize with pdftoppm → OCR each page (up to 3)
-      - image/heic / image/heif → convert with pillow-heif → OCR
-      - image/* → open with PIL → OCR
+    - application/pdf  → rasterize → OCR each page (up to 3)
+    - image/heic/heif   → pillow-heif → OCR
+    - image/*           → PIL open → OCR
 
-    Uses lang="heb+eng" and --psm 6 (uniform block) for best Hebrew results.
-    Does NOT log raw OCR text (privacy). Only char counts are logged.
+    Uses spatial reconstruction to keep Hebrew RTL rows consistent for parsing.
 
-    Returns {} on unrecoverable errors (caller treats as no text layer).
+    Returns {} on unrecoverable errors.
     """
-    import pytesseract
-
     pages_text: dict[int, str] = {}
 
     try:
         mime_lower = (mime_type or "").lower()
 
-        # Collect PIL images per page
         images: list = []
-
         if mime_lower == "application/pdf":
             images = _pdf_to_images(file_path)
         elif mime_lower in ("image/heic", "image/heif"):
             images = [_convert_heic_to_pil(file_path)]
         else:
-            # JPEG, PNG, WebP, etc.
             from PIL import Image
             images = [Image.open(str(file_path))]
 
         for page_idx, img in enumerate(images):
             processed = _preprocess_image(img)
-            text: str = pytesseract.image_to_string(
-                processed,
-                lang="heb+eng",
-                config="--psm 6",
-            )
+            text: str = _spatial_reconstruct_lines(processed, lang="heb+eng")
             pages_text[page_idx] = text
             logger.info(
-                "OCR page %d: %d chars extracted",
+                "OCR page %d: %d chars extracted (spatial reconstruction)",
                 page_idx,
                 len(text.strip()),
             )

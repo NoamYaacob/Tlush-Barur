@@ -61,6 +61,39 @@ _PROVIDER_PATTERNS: list[tuple[str, list[str], float]] = [
 
 
 # ---------------------------------------------------------------------------
+# Phase 11: Payslip Gatekeeper
+# ---------------------------------------------------------------------------
+
+# Keyword patterns that must appear for a document to be recognised as a payslip.
+# A document must match at least _PAYSLIP_MIN_KEYWORD_HITS distinct patterns.
+_PAYSLIP_KEYWORD_PATTERNS: list[re.Pattern] = [
+    re.compile(r'תלוש',         re.UNICODE),       # payslip
+    re.compile(r'שכר',          re.UNICODE),       # salary
+    re.compile(r'ברוטו',        re.UNICODE),       # gross
+    re.compile(r'נטו',          re.UNICODE),       # net
+    re.compile(r'ניכו',         re.UNICODE),       # deduction prefix (ניכויים / ניכוי)
+    re.compile(r'מעסיק',        re.UNICODE),       # employer
+    re.compile(r'עובד',         re.UNICODE),       # employee
+    re.compile(r'תשלומ',        re.UNICODE),       # payments prefix
+    re.compile(r'מס\s+הכנסה',   re.UNICODE),       # income tax
+    re.compile(r'ביטוח\s+לאומי', re.UNICODE),      # national insurance
+]
+_PAYSLIP_MIN_KEYWORD_HITS = 3  # at least 3 must match
+
+
+def is_valid_payslip(text: str) -> bool:
+    """
+    Return True if *text* contains at least _PAYSLIP_MIN_KEYWORD_HITS distinct
+    Hebrew payroll keywords, False otherwise.
+
+    Called after OCR text is obtained.  A False result causes parse_with_ocr()
+    to return error_code='INVALID_DOCUMENT' immediately without further processing.
+    """
+    hits = sum(1 for pat in _PAYSLIP_KEYWORD_PATTERNS if pat.search(text))
+    return hits >= _PAYSLIP_MIN_KEYWORD_HITS
+
+
+# ---------------------------------------------------------------------------
 # Regex patterns per field
 # Each entry: field_name → list of (pattern_str, confidence_tier)
 # Listed most-specific first; first tier with a match wins.
@@ -72,6 +105,10 @@ FIELD_PATTERNS: dict[str, list[tuple[str, float]]] = {
         (r'סה["\u05d4]\u05db\s+לתשלום[:\s]*₪?\s*([\d,]+\.?\d*)', CONFIDENCE_EXACT),
         (r'נטו[:\s]+₪?\s*([\d,]+\.?\d*)',              CONFIDENCE_AMBIGUOUS),
         (r'לתשלום[:\s]*₪?\s*([\d,]+\.?\d*)',           CONFIDENCE_AMBIGUOUS),
+        # Phase 11: additional synonyms
+        (r'שכר\s+נטו[:\s]*₪?\s*([\d,]+\.?\d*)',       CONFIDENCE_EXACT),    # שכר נטו
+        (r'נטו\s+בנק[:\s]*₪?\s*([\d,]+\.?\d*)',        CONFIDENCE_EXACT),    # נטו בנק
+        (r'סכום\s+ב?בנק[:\s]*₪?\s*([\d,]+\.?\d*)',     CONFIDENCE_EXACT),    # סכום בבנק / סכום בנק
     ],
     "gross_pay": [
         (r'ברוטו\s+לצורך\s+מס[:\s]*₪?\s*([\d,]+\.?\d*)', CONFIDENCE_EXACT),
@@ -79,6 +116,10 @@ FIELD_PATTERNS: dict[str, list[tuple[str, float]]] = {
         (r'סה["\u05d4]\u05db\s+ברוטו[:\s]*₪?\s*([\d,]+\.?\d*)',  CONFIDENCE_EXACT),
         (r'ברוטו[:\s]+₪?\s*([\d,]+\.?\d*)',               CONFIDENCE_AMBIGUOUS),
         (r'ברוטו\s+([\d,]+\.?\d*)',                        CONFIDENCE_AMBIGUOUS),
+        # Phase 11: additional synonyms
+        (r'סה["\u05d4]\u05db\s+תשלומים[:\s]*₪?\s*([\d,]+\.?\d*)', CONFIDENCE_EXACT),   # סה"כ תשלומים
+        (r'סך\s+(?:כל\s+)?התשלומים[:\s]*₪?\s*([\d,]+\.?\d*)',      CONFIDENCE_EXACT),   # סך כל התשלומים
+        (r'סך\s+הכל\s+שכר[:\s]*₪?\s*([\d,]+\.?\d*)',               CONFIDENCE_EXACT),   # סך הכל שכר
     ],
     "income_tax": [
         (r'מס\s+הכנסה[:\s]*₪?\s*([\d,]+\.?\d*)',       CONFIDENCE_EXACT),
@@ -129,12 +170,19 @@ _FIELD_PATTERNS_OCR_EXTRA: dict[str, list[tuple[str, float]]] = {
         (r'שכר[^\n]{0,30}([0-9][0-9,]+\.[0-9]{2})',          _CONF_OCR_LOW),
         # "נטו" followed by amount on same or next line (OCR sometimes inserts newlines)
         (r'נטו[^\n]{0,40}([0-9][0-9,]+\.?\d*)',              _CONF_OCR_AMBIGUOUS),
+        # Phase 11: additional synonyms (OCR-tolerant)
+        (r'נטו\s*בנק\s*[:\-]?\s*([0-9][0-9,\.]+)',           _CONF_OCR_EXACT),    # נטו בנק
+        (r'סכום\s*ב?בנק\s*[:\-]?\s*([0-9][0-9,\.]+)',        _CONF_OCR_EXACT),    # סכום בבנק / סכום בנק
     ],
     "gross_pay": [
         # "ברוטו למס הכנסה" or "ברוטו למס" (no strict punctuation)
         (r'ברוטו\s+למס\s*הכנסה?\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_EXACT),
         # "ברוטו לצורך" with garbled מס
         (r'ברוטו\s+לצורך\s*\S{0,4}\s*([0-9][0-9,\.]+)',        _CONF_OCR_AMBIGUOUS),
+        # Phase 11: additional synonyms (OCR-tolerant)
+        (r'סה["\u05d4]?כ\s*תשלומ\S{0,3}\s*[:\-]?\s*([0-9][0-9,\.]+)',  _CONF_OCR_EXACT),   # סה"כ תשלומים
+        (r'סך\s*כל\s*התשלומ\S{0,3}\s*[:\-]?\s*([0-9][0-9,\.]+)',        _CONF_OCR_EXACT),   # סך כל התשלומים
+        (r'סך\s*הכל\s*שכר\s*[:\-]?\s*([0-9][0-9,\.]+)',                 _CONF_OCR_EXACT),   # סך הכל שכר
     ],
     "income_tax": [
         # "מס הכנסה" with last letter garbled ("מס הכנסו", "מס הכנסת", etc.)
@@ -183,6 +231,10 @@ _FIELD_PATTERNS_OCR_EXTRA: dict[str, list[tuple[str, float]]] = {
         # OCR variant: "ניכויים לקופות" with number BEFORE label (RTL)
         # e.g. "20 01 | 519.50( ניכויים לקופות. S/N."
         (r'([0-9][0-9,]+\.[0-9]{2})\s*\(?[^\n]{0,15}ניכוי\S{0,3}\s+לקופו\S{0,3}', _CONF_OCR_AMBIGUOUS),
+        # Phase 11: additional pension/provident fund synonyms
+        (r'פנסיה\s*מקיפ\S{0,2}\s*[:\-]?\s*([0-9][0-9,\.]+)',               _CONF_OCR_EXACT),     # פנסיה מקיפה
+        (r'קופת\s*גמל\s*בהסכ\S{0,3}\s*[:\-]?\s*([0-9][0-9,\.]+)',          _CONF_OCR_EXACT),     # קופת גמל בהסכם
+        (r'קופו\S{0,3}\s+גמל\s+וקרנו\S{0,3}\s*[:\-]?\s*([0-9][0-9,\.]+)', _CONF_OCR_AMBIGUOUS), # קופות גמל וקרנות
     ],
     "other_deductions": [
         # ניכויים שונים
@@ -917,6 +969,47 @@ def detect_provider(full_text: str) -> tuple[str | None, float]:
             if term.lower() in lower_text:
                 return (display_name, weight)
     return (None, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Phase 15: Educational insights bridge
+# ---------------------------------------------------------------------------
+
+def _build_insights(
+    gross: float | None,
+    net: float | None,
+    income_tax: float | None,
+    national_ins: float | None,
+    health: float | None,
+    pension_employee: float | None,
+    credit_points: float | None,
+    line_items: list,
+) -> list:
+    """
+    Call generate_insights() from app.logic.insights and convert the plain
+    dataclass results to Insight Pydantic schema objects for inclusion in
+    ParsedSlipPayload.  Import is deferred to avoid circular imports.
+    """
+    try:
+        from app.logic.insights import generate_insights as _gen_insights
+        from app.models.schemas import Insight as _InsightSchema
+        raw = _gen_insights(
+            gross=gross,
+            net=net,
+            income_tax=income_tax,
+            national_insurance=national_ins,
+            health_insurance=health,
+            pension_employee=pension_employee,
+            credit_points=credit_points,
+            line_items=line_items,
+        )
+        return [
+            _InsightSchema(id=ins.id, kind=ins.kind, title=ins.title, body=ins.body)
+            for ins in raw
+        ]
+    except Exception as exc:
+        logger.warning("insights: failed to generate insights (%s)", exc)
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -1921,6 +2014,7 @@ def parse_pdf(file_path: str | Path, answers=None) -> "ParsedSlipPayload":  # ty
         ),
         line_items=line_items,
         anomalies=anomalies,
+        insights=_build_insights(gross, net, income_tax, national_ins, health, None, credit_points, line_items),
         blocks=blocks,
         tax_credits_detected=tax_credits,
         answers_applied=answers is not None,
@@ -2201,6 +2295,61 @@ def _line_amounts(line: str) -> list[float]:
     return [v for _, v in found]
 
 
+# ---------------------------------------------------------------------------
+# Phase 13: OCR description sanitization helper
+# ---------------------------------------------------------------------------
+
+# Compiled once at import time for efficiency.
+# Matches isolated Latin-only "words" — these are Tesseract artifacts produced
+# when reading Hebrew text that has been partially covered by redaction markers.
+# Examples seen in real payslips: "DANN", "NAD", "DNN", "MAN", "ANN", "NN".
+# We allow short Latin tokens that look like abbreviations (1-2 uppercase letters)
+# only when surrounded by Hebrew, but strip anything ≥3 Latin chars or pure Latin.
+_RE_LATIN_ARTIFACT = re.compile(
+    r'\b[A-Za-z]{3,}\b',   # Latin word of 3+ characters (guaranteed artifact)
+    re.ASCII,
+)
+# Dates in various formats inserted by Tesseract when reading table header cells
+_RE_OCR_DATE_ARTIFACT = re.compile(
+    r'\b\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}\b',
+)
+# Sequences of 4+ consecutive digits that are not amounts (numeric codes, IDs)
+_RE_NUMERIC_CODE = re.compile(
+    r'(?<![,\d])\d{4,}(?![,\d])',  # 4+ digits not adjacent to comma-separated amounts
+)
+
+
+def _sanitize_ocr_description(raw: str) -> str:
+    """
+    Strip common OCR artifacts from a raw OCR description string before it
+    is stored as description_hebrew.
+
+    Artifacts removed (in order):
+      1. Latin words of 3+ characters (e.g., "DANN", "NAD", "DNN") — produced
+         by Tesseract misreading redacted Hebrew text.
+      2. Date strings in DD/MM/YYYY, DD-MM-YYYY, DD.MM.YYYY format.
+      3. Isolated numeric codes of 4+ digits not adjacent to decimal amounts.
+      4. Resulting extra whitespace is collapsed.
+
+    Hebrew characters, digits, punctuation, and short Latin abbreviations
+    (1–2 chars) that might be legitimate (e.g., "VIP", currency codes) are
+    preserved.
+
+    Returns the sanitized string, or the original string if sanitization
+    would make it empty.
+    """
+    cleaned = raw
+    cleaned = _RE_LATIN_ARTIFACT.sub(" ", cleaned)
+    cleaned = _RE_OCR_DATE_ARTIFACT.sub(" ", cleaned)
+    cleaned = _RE_NUMERIC_CODE.sub(" ", cleaned)
+    # Collapse multiple spaces / strip edges
+    cleaned = re.sub(r'[ \t]{2,}', ' ', cleaned).strip()
+    # Safety: if the whole description was noise, return the original (truncated)
+    if not cleaned or not re.search(r'[\u0590-\u05ff\d]', cleaned):
+        return raw.strip()
+    return cleaned
+
+
 def _classify_line_item(
     line: str,
     item_index: int,
@@ -2350,7 +2499,7 @@ def _classify_line_item(
     return LineItem(
         id=f"li_ocr_unk_{item_index}",
         category=default_category or LineItemCategory.EARNING,   # Phase 10: section context wins; fallback EARNING
-        description_hebrew=line.strip()[:40] or "שורה לא מזוהה",
+        description_hebrew=_sanitize_ocr_description(line[:80])[:40] or "שורה לא מזוהה",  # Phase 13: strip OCR artifacts
         explanation_hebrew=(
             "שורה זו לא זוהתה על-ידי המערכת. "
             "ייתכן שמדובר בתשלום חד-פעמי, תוספת חוזית מיוחדת, "
@@ -2718,13 +2867,20 @@ def _apply_gross_net_fallback(
     net_to_pay_confidence: "float | None",
     net_salary_value: "float | None",
     net_salary_confidence: "float | None",
+    total_payments_other_value: "float | None" = None,
+    total_payments_other_confidence: "float | None" = None,
 ) -> "tuple[float | None, float, str | None, float | None, float, str | None]":
     """
     Phase 7: Apply smart fallback when main gross/net extraction failed.
 
-    Priority order:
-      gross: gross_taxable → gross_ni  (confidence × 0.85 penalty)
-      net:   net_to_pay   → net_salary (confidence × 0.85 penalty)
+    Priority order for gross (Phase 12 update):
+      1. total_payments_other — סה"כ תשלומים: the true employee gross pay
+         (excludes tax-inflated gross_taxable which includes employer-side items)
+      2. gross_taxable        — ברוטו למס הכנסה: tax gross (may be higher than actual pay)
+      3. gross_ni             — ברוטו לביטוח לאומי
+
+    Priority order for net:
+      net_to_pay → net_salary  (confidence × 0.85 penalty)
 
     Returns:
       (resolved_gross, gross_confidence, gross_fallback_note,
@@ -2732,10 +2888,15 @@ def _apply_gross_net_fallback(
     """
     # --- Gross ---
     if gross is None:
-        if gross_taxable_value is not None and gross_taxable_confidence is not None:
-            resolved_gross: float | None = gross_taxable_value
+        if total_payments_other_value is not None and total_payments_other_confidence is not None:
+            # Phase 12: prefer סה"כ תשלומים — it is the actual total pay to the employee
+            resolved_gross: float | None = total_payments_other_value
+            gross_confidence = round(total_payments_other_confidence * 0.85, 3)
+            gross_fallback_note: str | None = 'ברוטו חושב מ-סה"כ תשלומים'
+        elif gross_taxable_value is not None and gross_taxable_confidence is not None:
+            resolved_gross = gross_taxable_value
             gross_confidence = round(gross_taxable_confidence * 0.85, 3)
-            gross_fallback_note: str | None = "ברוטו חושב מ-ברוטו למס הכנסה"
+            gross_fallback_note = "ברוטו חושב מ-ברוטו למס הכנסה"
         elif gross_ni_value is not None and gross_ni_confidence is not None:
             resolved_gross = gross_ni_value
             gross_confidence = round(gross_ni_confidence * 0.85, 3)
@@ -2858,6 +3019,51 @@ def parse_with_ocr(
         len(pages_text),
     )
 
+    # Phase 11.1: Debug — always print the first 500 OCR chars to the terminal
+    # so we can see exactly what Tesseract read before the gatekeeper evaluates it.
+    _ocr_preview = full_text.strip()[:500].replace("\n", "↵")
+    logger.warning("OCR RAW PREVIEW (first 500 chars): %s", _ocr_preview)
+
+    # Phase 11: Gatekeeper — reject non-payslip documents immediately
+    if not is_valid_payslip(full_text):
+        logger.warning("Gatekeeper: document rejected as non-payslip for %s", file_path)
+        return ParsedSlipPayload(
+            slip_meta=SlipMeta(pay_month=None, provider_guess="unknown", confidence=0.0),
+            summary=SummaryTotals(integrity_ok=True),
+            line_items=[],
+            anomalies=[],
+            blocks=[],
+            answers_applied=answers is not None,
+            error_code="INVALID_DOCUMENT",
+            parse_source="ocr",
+        )
+
+    # Phase 14: LLM Intelligence Layer — attempt Gemini extraction first.
+    # If GEMINI_API_KEY is set, send the OCR text to Gemini for structured JSON
+    # extraction.  On any failure (missing key, network error, parse/validation error),
+    # we log a warning and fall through to the existing regex pipeline below.
+    try:
+        from app.services.llm_parser import llm_extract
+        logger.info(
+            "LLM: attempting Gemini extraction for %s (%d chars)",
+            Path(file_path).name,
+            len(full_text),
+        )
+        _llm_payload = llm_extract(full_text, answers)
+        logger.info(
+            "LLM: extraction successful (%d line items, gross=%s, net=%s)",
+            len(_llm_payload.line_items),
+            _llm_payload.summary.gross,
+            _llm_payload.summary.net,
+        )
+        return _llm_payload
+    except Exception as _llm_exc:
+        logger.warning(
+            "LLM: extraction failed (%s) — falling back to regex pipeline",
+            _llm_exc,
+        )
+        # Fall through to existing regex pipeline below
+
     # --- Debug preview (local dev only — never stored in prod) ---
     debug_preview: str | None = None
     if transient and os.environ.get("DEBUG_OCR_PREVIEW", "").lower() == "true":
@@ -2922,6 +3128,8 @@ def parse_with_ocr(
         net_to_pay_confidence=net_to_pay_field.confidence if net_to_pay_field else None,
         net_salary_value=net_salary_field.value if net_salary_field else None,
         net_salary_confidence=net_salary_field.confidence if net_salary_field else None,
+        total_payments_other_value=total_payments_other_field.value if total_payments_other_field else None,
+        total_payments_other_confidence=total_payments_other_field.confidence if total_payments_other_field else None,
     )
 
     income_tax = income_tax_field.value if income_tax_field else None
@@ -3170,6 +3378,11 @@ def parse_with_ocr(
         ),
         line_items=line_items,
         anomalies=anomalies,
+        insights=_build_insights(
+            gross, net, income_tax, national_ins, health,
+            provident_funds_field.value if provident_funds_field else None,
+            credit_points, line_items,
+        ),
         blocks=blocks,
         tax_credits_detected=tax_credits,
         answers_applied=answers is not None,

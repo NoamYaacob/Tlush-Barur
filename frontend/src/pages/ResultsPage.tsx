@@ -13,6 +13,8 @@ import {
   type CorrectionEntry,
   type LineItem,
   type Anomaly,
+  type Insight,
+  type InsightKind,
   type CreditWizardRequest,
   type CreditWizardResult,
   submitCreditWizard,
@@ -177,6 +179,69 @@ function EditableNumber({
 }
 
 // ---------------------------------------------------------------------------
+// Phase 15: InsightsPanel — color-coded educational insight cards
+// ---------------------------------------------------------------------------
+
+const INSIGHT_STYLE: Record<InsightKind, { card: string; badge: string; icon: string }> = {
+  success: {
+    card: "bg-green-50 border-green-200",
+    badge: "bg-green-100 text-green-800",
+    icon: "✅",
+  },
+  info: {
+    card: "bg-blue-50 border-blue-200",
+    badge: "bg-blue-100 text-blue-800",
+    icon: "💡",
+  },
+  warning: {
+    card: "bg-yellow-50 border-yellow-300",
+    badge: "bg-yellow-100 text-yellow-800",
+    icon: "⚠️",
+  },
+};
+
+const INSIGHT_KIND_LABEL: Record<InsightKind, string> = {
+  success: "חיובי",
+  info: "מידע",
+  warning: "שים לב",
+};
+
+function InsightsPanel({ insights }: { insights: Insight[] }) {
+  if (!insights || insights.length === 0) return null;
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-5">
+      <h3 className="font-bold text-gray-700 mb-3">תובנות חכמות 🎓</h3>
+      <div className="space-y-3">
+        {insights.map((ins) => {
+          const style = INSIGHT_STYLE[ins.kind] ?? INSIGHT_STYLE.info;
+          return (
+            <div
+              key={ins.id}
+              className={`rounded-lg border p-4 ${style.card}`}
+              dir="rtl"
+            >
+              <div className="flex items-start gap-2">
+                <span className="text-lg leading-none mt-0.5">{style.icon}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${style.badge}`}>
+                      {INSIGHT_KIND_LABEL[ins.kind]}
+                    </span>
+                    <span className="font-semibold text-gray-800 text-sm">{ins.title}</span>
+                  </div>
+                  <p className="text-sm text-gray-600 leading-relaxed">{ins.body}</p>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Tab sub-views
 // ---------------------------------------------------------------------------
 
@@ -207,7 +272,7 @@ function SummaryTab({ result, savingField, onCorrection }: SummaryTabProps) {
           </div>
           <div>
             <span className="text-gray-500">ספק: </span>
-            <span className="font-medium">{slip_meta.provider_guess}</span>
+            <span className="font-medium text-gray-400">ספק שכר</span>
           </div>
           <div>
             <span className="text-gray-500">מעסיק: </span>
@@ -239,6 +304,13 @@ function SummaryTab({ result, savingField, onCorrection }: SummaryTabProps) {
               </span>
             </div>
           )}
+          {result.parse_source === "ocr_llm" && (
+            <div className="col-span-2 mt-1">
+              <span className="inline-flex items-center gap-1 text-xs bg-purple-100 text-purple-800 px-2 py-0.5 rounded-full font-medium">
+                ✨ נותח ע"י בינה מלאכותית (Gemini)
+              </span>
+            </div>
+          )}
           {result.ocr_debug_preview && (
             <div className="col-span-2 mt-2">
               <details className="text-xs bg-yellow-50 border border-yellow-200 rounded-lg">
@@ -253,6 +325,9 @@ function SummaryTab({ result, savingField, onCorrection }: SummaryTabProps) {
           )}
         </div>
       </div>
+
+      {/* Phase 15: Insights panel — above summary cards */}
+      <InsightsPanel insights={result.insights ?? []} />
 
       {/* Summary cards — gross and net are editable */}
       <div className="grid grid-cols-2 gap-3">
@@ -1203,6 +1278,29 @@ export function ResultsPage() {
             className="bg-blue-600 text-white px-6 py-2 rounded-lg text-sm font-medium hover:bg-blue-700"
           >
             העלה שוב
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Invalid document (uploaded file is not a payslip) ----
+  if (data.status === "done" && data.result?.error_code === "INVALID_DOCUMENT") {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
+        <div className="bg-white border border-red-200 rounded-2xl p-8 text-center max-w-md shadow-sm">
+          <div className="text-5xl mb-4">📄</div>
+          <p className="font-bold text-gray-800 text-lg mb-2">
+            הקובץ אינו נראה כתלוש שכר
+          </p>
+          <p className="text-sm text-gray-600 mb-6 leading-relaxed">
+            הקובץ שהועלה אינו זוהה כתלוש שכר. אנא ודא שהעלית את הקובץ הנכון.
+          </p>
+          <button
+            onClick={() => navigate("/upload")}
+            className="bg-blue-600 text-white px-6 py-3 rounded-xl text-sm font-semibold hover:bg-blue-700 transition-colors w-full"
+          >
+            העלאת קובץ אחר
           </button>
         </div>
       </div>

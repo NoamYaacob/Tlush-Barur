@@ -99,6 +99,16 @@ export interface Anomaly {
   related_line_item_ids: string[];
 }
 
+// Phase 15: Educational insight card
+export type InsightKind = "info" | "success" | "warning";
+
+export interface Insight {
+  id: string;
+  kind: InsightKind;   // "info" → blue  |  "success" → green  |  "warning" → yellow
+  title: string;       // Short Hebrew headline
+  body: string;        // Explanatory Hebrew paragraph
+}
+
 export interface SectionBlock {
   section_name: string;
   section_type: string; // "earnings_table" | "deductions_section" | "contributions_section" |
@@ -142,6 +152,7 @@ export interface ParsedSlipPayload {
   summary: SummaryTotals;
   line_items: LineItem[];
   anomalies: Anomaly[];
+  insights: Insight[];   // Phase 15: educational insight cards (always present, may be empty)
   blocks: SectionBlock[];
   tax_credits_detected: TaxCreditsDetected | null;
   answers_applied: boolean;
