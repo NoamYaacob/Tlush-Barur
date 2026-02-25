@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 TEXT_MIN_CHARS = 50          # total stripped chars to consider text layer present
+_HEBREW_UNICODE_MIN = 10     # minimum real Hebrew Unicode code points required in text layer
 CONFIDENCE_EXACT = 0.85      # primary keyword + value pattern matched
 CONFIDENCE_AMBIGUOUS = 0.60  # bare fallback keyword matched
 CONFIDENCE_BOOST = 0.90      # boosted when same numeric value appears 2+ times
@@ -74,6 +75,7 @@ FIELD_PATTERNS: dict[str, list[tuple[str, float]]] = {
     ],
     "gross_pay": [
         (r'ברוטו\s+לצורך\s+מס[:\s]*₪?\s*([\d,]+\.?\d*)', CONFIDENCE_EXACT),
+        (r'ברוטו\s+למס\s+הכנסה[:\s]*₪?\s*([\d,]+\.?\d*)', CONFIDENCE_EXACT),  # Phase 8.1: Hilan layout
         (r'סה["\u05d4]\u05db\s+ברוטו[:\s]*₪?\s*([\d,]+\.?\d*)',  CONFIDENCE_EXACT),
         (r'ברוטו[:\s]+₪?\s*([\d,]+\.?\d*)',               CONFIDENCE_AMBIGUOUS),
         (r'ברוטו\s+([\d,]+\.?\d*)',                        CONFIDENCE_AMBIGUOUS),
@@ -93,6 +95,7 @@ FIELD_PATTERNS: dict[str, list[tuple[str, float]]] = {
     ],
     "tax_credits": [
         (r'נקודות\s+זיכוי[:\s]*([\d]+\.?\d*)',          CONFIDENCE_EXACT),
+        (r'נקודות\s+ציכוי[:\s]*([\d]+\.?\d*)',          CONFIDENCE_EXACT),   # Phase 8.1: Hilan ציכוי variant
         (r'נ["\u05d4]\.?ז[:\s]+([\d]+\.?\d*)',          CONFIDENCE_AMBIGUOUS),
         (r'זיכוי\s+מס[:\s]*([\d]+\.?\d*)',              CONFIDENCE_AMBIGUOUS),
     ],
@@ -150,6 +153,8 @@ _FIELD_PATTERNS_OCR_EXTRA: dict[str, list[tuple[str, float]]] = {
     "tax_credits": [
         # "נקודות זיכוי" with spaces/typos — label before number
         (r'נקודו\S{0,3}\s+זיכו\S{0,2}\s*[:\-]?\s*([0-9]+\.?[0-9]*)', _CONF_OCR_EXACT),
+        # Phase 8.1: Tesseract confuses ז (zayin) with צ (tsadi) on Hilan fonts → "נקודות ציכוי"
+        (r'נקודו\S{0,3}\s+ציכו\S{0,2}\s*[:\-]?\s*([0-9]+\.?[0-9]*)', _CONF_OCR_EXACT),
         # "נקודות" with number before (RTL layout: "2.25 ... נקודות")
         (r'([0-9]+\.[0-9]{2})\s+[^\n]{0,30}נקודו\S{0,3}', _CONF_OCR_AMBIGUOUS),
     ],
@@ -261,11 +266,31 @@ def extract_text_from_pdf(file_path: str | Path) -> dict[int, str]:
 
 def has_text_layer(pages_text: dict[int, str]) -> bool:
     """
-    Return True if total stripped character count across all pages >= TEXT_MIN_CHARS.
-    Avoids false positives from PDFs that have only whitespace/newlines as text.
+    Return True only if the extracted text is both long enough AND contains
+    real Hebrew Unicode characters.
+
+    Phase 8.1: Hilan and some other Israeli payroll vendors embed Hebrew using
+    proprietary font encodings (custom CMap). pdfplumber extracts garbled
+    Latin-range characters instead of Hebrew Unicode — this function must detect
+    that case and return False so the OCR upgrade path is triggered instead of
+    returning an empty payload on the text-layer path.
+
+    Checks:
+      1. Total stripped chars >= TEXT_MIN_CHARS (original check).
+      2. At least _HEBREW_UNICODE_MIN characters fall in the Hebrew Unicode block
+         (U+0590–U+05FF) or Hebrew presentation forms (U+FB1D–U+FB4F).
     """
-    total = sum(len(t.strip()) for t in pages_text.values())
-    return total >= TEXT_MIN_CHARS
+    full = "".join(pages_text.values())
+    stripped = full.strip()
+    if len(stripped) < TEXT_MIN_CHARS:
+        return False
+    # Require genuine Hebrew Unicode — proprietary-encoded PDFs fail this check
+    # even when they contain thousands of Latin-range substitution characters.
+    hebrew_chars = sum(
+        1 for c in stripped
+        if '\u0590' <= c <= '\u05FF' or '\uFB1D' <= c <= '\uFB4F'
+    )
+    return hebrew_chars >= _HEBREW_UNICODE_MIN
 
 
 def extract_field(
@@ -1753,6 +1778,27 @@ def parse_pdf(file_path: str | Path, answers=None) -> "ParsedSlipPayload":  # ty
     health = health_field.value if health_field else None
     credit_points = credits_field.value if credits_field else None
     pay_month = pay_month_result[0] if pay_month_result else None
+
+    # Phase 8.1: Zero-field fallback — if text-layer extraction found neither gross nor net,
+    # the text layer is probably present but unreadable (proprietary font encoding, rotated
+    # page, unusual layout, etc.). Fall through to OCR rather than returning an empty result.
+    # This is belt-and-suspenders: has_text_layer() already filters most encoding problems,
+    # but some PDFs may have a few Hebrew chars yet still fail all field patterns.
+    if gross is None and net is None:
+        logger.info(
+            "Text-layer extraction yielded no gross/net for %s — treating as OCR_REQUIRED",
+            file_path,
+        )
+        return ParsedSlipPayload(  # type: ignore[call-arg]
+            slip_meta=SlipMeta(provider_guess="unknown"),
+            summary=SummaryTotals(),
+            line_items=[],
+            anomalies=[],
+            blocks=[],
+            error_code="OCR_REQUIRED",
+            parse_source="ocr_required",
+            transient=True,
+        )
 
     # Total known deductions
     known_deductions = sum(d for d in [income_tax, national_ins, health] if d is not None)

@@ -226,24 +226,36 @@ def test_empty_pdf_returns_ocr_required():
 # ===========================================================================
 
 def test_has_text_layer_threshold():
-    """Verify TEXT_MIN_CHARS boundary condition for has_text_layer."""
+    """Verify TEXT_MIN_CHARS boundary and Hebrew Unicode validation for has_text_layer.
+
+    Phase 8.1: has_text_layer() now requires both minimum char count AND real Hebrew
+    Unicode code points. This prevents Hilan-encoded PDFs (which produce Latin garbage)
+    from bypassing the OCR upgrade path.
+    """
     from app.services.parser import TEXT_MIN_CHARS, has_text_layer
 
-    # Just below threshold → False
+    # Just below threshold → False (א is Hebrew Unicode, but not enough chars)
     short = {0: "א" * (TEXT_MIN_CHARS - 1)}
     assert not has_text_layer(short), f"Expected False for {TEXT_MIN_CHARS - 1} chars"
 
-    # Exactly at threshold → True
+    # Exactly at threshold with Hebrew → True
     exact = {0: "א" * TEXT_MIN_CHARS}
-    assert has_text_layer(exact), f"Expected True for exactly {TEXT_MIN_CHARS} chars"
+    assert has_text_layer(exact), f"Expected True for exactly {TEXT_MIN_CHARS} Hebrew chars"
 
-    # Well above threshold (55+ chars of real payslip text)
+    # Well above threshold (55+ chars of real payslip text with Hebrew Unicode)
     rich = {0: "ברוטו: 15,000 נטו לתשלום: 11,000 מס הכנסה: 2,500 ביטוח לאומי: 900"}
-    assert has_text_layer(rich), f"Expected True for rich text (len={len(rich[0].strip())})"
+    assert has_text_layer(rich), f"Expected True for rich Hebrew text"
 
     # Whitespace only → False (stripped)
     whitespace = {0: "   \n\t  " * 20}
     assert not has_text_layer(whitespace), "Whitespace-only should be False"
+
+    # Phase 8.1: Latin-only text (Hilan proprietary font encoding) → False,
+    # even when total char count far exceeds TEXT_MIN_CHARS.
+    # This simulates what pdfplumber extracts from a Hilan-encoded PDF.
+    hilan_garbled = {0: "äæ øëù ùåìúá íéðåúðä æåëéø úåáåçø ïîâøáî òá úååö 511514101 ãéâàú " * 3}
+    assert not has_text_layer(hilan_garbled), \
+        "Latin-only garbled text (Hilan font encoding) must return False"
 
 
 # ===========================================================================
@@ -320,6 +332,63 @@ def test_parse_pdf_full_integration():
         assert payload.slip_meta.provider_guess == "חילן"
         assert payload.slip_meta.pay_month == "2025-01"
         assert payload.answers_applied is False
+
+    finally:
+        pdf_path.unlink(missing_ok=True)
+
+
+# ===========================================================================
+# Test 8: Hilan font encoding — garbled text bypasses text layer (Phase 8.1)
+# ===========================================================================
+
+def test_hilan_encoding_bypasses_text_layer():
+    """
+    Garbled Latin text produced by pdfplumber on Hilan-encoded PDFs must fail
+    has_text_layer() so that the OCR upgrade path is triggered instead.
+
+    Phase 8.1: has_text_layer() now requires real Hebrew Unicode code points,
+    not just any characters that pass the length threshold.
+    """
+    from app.services.parser import has_text_layer
+
+    # Actual garbled text extracted from a real Hilan PDF via pdfplumber
+    hilan_garbled = {
+        0: "äæ øëù ùåìúá íéðåúðä æåëéø úåáåçø ïîâøáî òá úååö 511514101 ãéâàú 926190869",
+        1: "ïåéæéçî êåñ äñðëä õîéá åèøá äëéøö êåñ äñðëä õîéá åèøá",
+    }
+    assert not has_text_layer(hilan_garbled), \
+        "Hilan proprietary-font encoding must NOT be treated as a readable Hebrew text layer"
+
+
+# ===========================================================================
+# Test 9: Zero-field fallback → OCR_REQUIRED (Phase 8.1)
+# ===========================================================================
+
+def test_zero_field_fallback_triggers_ocr_required():
+    """
+    When parse_pdf() reads a text-layer PDF but cannot extract gross or net
+    (e.g. because the text layer has some Hebrew chars but no matching field patterns),
+    it must return error_code='OCR_REQUIRED' so the processor can retry with Tesseract.
+
+    This test uses a PDF whose text contains valid Hebrew but no payslip field labels,
+    simulating the Hilan case where has_text_layer() would otherwise pass.
+    """
+    from app.services.parser import parse_pdf
+
+    # A PDF with sufficient Hebrew Unicode to pass has_text_layer() but no field values
+    irrelevant_text = "שלום עולם זהו טקסט עברי ללא נתוני שכר כלל לא ברוטו לא נטו לא מסים"
+    pdf_path = _make_pdf_with_text(irrelevant_text)
+    try:
+        payload = parse_pdf(pdf_path, answers=None)
+
+        assert payload.error_code == "OCR_REQUIRED", (
+            f"Zero-field text layer must fall through to OCR_REQUIRED; "
+            f"got error_code={payload.error_code!r}, parse_source={payload.parse_source!r}"
+        )
+        assert payload.parse_source == "ocr_required"
+        assert payload.summary.gross is None
+        assert payload.summary.net is None
+        assert len(payload.line_items) == 0
 
     finally:
         pdf_path.unlink(missing_ok=True)
